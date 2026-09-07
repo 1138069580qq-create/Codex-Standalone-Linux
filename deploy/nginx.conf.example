@@ -1,0 +1,37 @@
+# Add to the http {} context, once. Use your own zone name if already present.
+limit_req_zone $binary_remote_addr zone=codex_login:1m rate=6r/m;
+
+server {
+    listen 443 ssl;
+    server_name codex.example.com;
+    # Configure YOUR certificate files. This example does not issue certificates.
+    ssl_certificate /etc/letsencrypt/live/codex.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/codex.example.com/privkey.pem;
+    client_max_body_size 6m;
+
+    location = /api/login {
+        limit_req zone=codex_login burst=6 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:3210;
+        proxy_set_header Host $host;
+    }
+    location = /api/codex/events {
+        proxy_pass http://127.0.0.1:3210;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+        proxy_read_timeout 180s;
+        proxy_send_timeout 180s;
+        add_header X-Accel-Buffering no;
+    }
+    location / {
+        proxy_pass http://127.0.0.1:3210;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_read_timeout 65s;
+        # Keep application's Content-Encoding, Cache-Control and ETag intact.
+    }
+}

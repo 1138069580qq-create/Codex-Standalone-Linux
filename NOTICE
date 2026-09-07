@@ -1,0 +1,8 @@
+Codex Standalone Linux
+
+Backend modules and regression tests are derived from the Codex console plugin
+in ElementsPanel-Codex-Console, commit 50e3083 (Apache-2.0).
+Original project: ElementsPanel/ElementsPanel (Apache-2.0).
+Modified: standalone authentication, HTTP lifecycle, streaming, deployment and UI.
+No ElementsPanel runtime, database, plugin host or frontend is required.
+Not an official OpenAI application.

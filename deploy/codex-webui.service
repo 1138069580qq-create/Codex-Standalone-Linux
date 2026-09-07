@@ -1,0 +1,22 @@
+[Unit]
+Description=Standalone Codex WebUI (attach-only)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/codex-webui
+Environment=NODE_ENV=production
+EnvironmentFile=%h/.config/codex-webui/env
+ExecStart=/usr/bin/node --import tsx /opt/codex-webui/src/server.ts
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+# Keep the existing Codex user's sockets visible. Do NOT use PrivateTmp=true.
+PrivateTmp=false
+MemoryMax=512M
+TasksMax=128
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,839 @@
+import { promises as fs } from "fs";
+import { randomUUID } from "crypto";
+import { CodexRpcClient } from "./transport";
+import {
+  ConsoleError,
+  ConfigStore,
+  Identity,
+  Project,
+  requireProject,
+  permissions
+} from "./config";
+import { ReplayHub } from "./events";
+import {
+  MAX_ITEM_CHARS,
+  normalizeItem,
+  runtimeStatus,
+  threadTitle,
+  TimelineItem
+} from "./normalize";
+import { CommandReceipts } from "./receipts";
+import { attachmentPath } from "./files";
+import { discoverExistingCodex, type DiscoveredCodexEndpoint } from "./discovery";
+import { normalizeRateLimits, type CodexRateLimits } from "./limits";
+
+interface Session {
+  id: string;
+  projectId: string;
+  title: string;
+  status: string;
+  turnId?: string;
+  lastCompletedTurnId?: string;
+  items: Map<string, TimelineItem>;
+  truncated: boolean;
+  touched: number;
+}
+interface Pending {
+  id: string;
+  rawId: string | number;
+  method: string;
+  params: any;
+  kind: "command" | "file" | "question" | "unsupported";
+  threadId: string;
+  turnId?: string;
+  description: string;
+  questions?: any[];
+}
+export class CodexConsoleService {
+  readonly hub = new ReplayHub();
+  private peer?: CodexRpcClient;
+  private connecting?: Promise<void>;
+  private sessions = new Map<string, Session>();
+  private pending = new Map<string, Pending>();
+  private opening = new Map<string, Promise<Session>>();
+  private reservations = new Set<string>();
+  private modelsCache?: { at: number; data: any[] };
+  private limitsCache?: CodexRateLimits;
+  private reason = "Codex is not configured or connected.";
+  private deltas = new Map<
+    string,
+    { threadId: string; itemId: string; offset: number; text: string }
+  >();
+  private deltaTimer?: ReturnType<typeof setTimeout>;
+  constructor(
+    readonly config: ConfigStore,
+    readonly receipts: CommandReceipts,
+    private factory = (options: any) => new CodexRpcClient(options)
+  ) {}
+  status(identity: Identity) {
+    return {
+      configured: this.config.value.enabled,
+      connected: this.peer?.connected || false,
+      transport: this.config.value.transport.type,
+      serverVersion: (this.peer?.serverInfo as any)?.userAgent,
+      desktopSync: "unverified",
+      processPolicy: "attach-only",
+      userId: identity.uuid,
+      admin: identity.elevated,
+      reason: this.peer?.connected ? undefined : this.reason,
+      maxConcurrentTurns: this.config.value.maxConcurrentTurns
+    };
+  }
+  async discover(identity: Identity): Promise<DiscoveredCodexEndpoint[]> {
+    if (!identity.elevated)
+      throw new ConsoleError(
+        403,
+        "ADMIN_REQUIRED",
+        "A administrator is required to discover the existing Codex endpoint."
+      );
+    return discoverExistingCodex();
+  }
+  get hasActiveWork(): boolean {
+    return (
+      this.reservations.size > 0 ||
+      this.pending.size > 0 ||
+      [...this.sessions.values()].some((s) => s.status === "running")
+    );
+  }
+  async connect(): Promise<void> {
+    if (this.connecting) return this.connecting;
+    this.connecting = this.connectOnce();
+    try {
+      await this.connecting;
+    } finally {
+      this.connecting = undefined;
+    }
+  }
+  private async connectOnce(): Promise<void> {
+    if (!this.config.value.enabled)
+      throw new ConsoleError(409, "NOT_CONFIGURED", "Enable and configure Codex first.");
+    if (this.peer?.connected) return;
+    this.disconnect();
+    if (!["unix", "websocket"].includes(this.config.value.transport.type))
+      throw new ConsoleError(
+        400,
+        "ATTACH_ONLY",
+        "Only connecting to the existing Codex backend is permitted."
+      );
+    const peer = this.factory(this.config.value.transport);
+    this.peer = peer;
+    peer.on("notification", (message: any) => {
+      if (this.peer !== peer) return;
+      try {
+        this.notification(message);
+      } catch {
+        peer.close();
+      }
+    });
+    peer.on("request", (message: any) => {
+      if (this.peer !== peer) return;
+      try {
+        this.serverRequest(message);
+      } catch {
+        peer.close();
+      }
+    });
+    peer.on("disconnect", () => {
+      if (this.peer !== peer) return;
+      this.flushDeltas();
+      this.pending.clear();
+      this.sessions.clear();
+      this.opening.clear();
+      this.reservations.clear();
+      this.reason =
+        "Codex disconnected. Reconnect explicitly; pending commands will not be resent.";
+      this.hub.publish({ type: "connection", payload: { connected: false } });
+      this.hub.reset("backend-disconnected");
+    });
+    try {
+      await peer.connect();
+      if (this.peer !== peer)
+        throw new ConsoleError(
+          409,
+          "CONNECTION_CHANGED",
+          "Connection changed during initialization."
+        );
+      this.reason = "";
+      this.hub.publish({ type: "connection", payload: { connected: true } });
+    } catch (error) {
+      this.reason = "Could not connect to Codex. Check the server-side configuration and logs.";
+      peer.close();
+      throw error;
+    }
+  }
+  disconnect(): void {
+    this.flushDeltas();
+    const old = this.peer;
+    this.peer = undefined;
+    old?.close();
+    this.pending.clear();
+    this.sessions.clear();
+    this.opening.clear();
+    this.modelsCache = undefined;
+    this.reason = "Codex is disconnected.";
+    this.hub.publish({ type: "connection", payload: { connected: false } });
+    this.hub.reset("connection-changed");
+  }
+  private rpc(): CodexRpcClient {
+    if (!this.peer?.connected) throw new ConsoleError(503, "CODEX_OFFLINE", this.reason);
+    return this.peer;
+  }
+  project(
+    identity: Identity,
+    id: string,
+    capability: "view" | "send" | "approve" | "files" = "view"
+  ): Project {
+    if (!this.config.value.enabled)
+      throw new ConsoleError(409, "DISABLED", "Codex console is disabled.");
+    return requireProject(this.config.value, identity, id, capability);
+  }
+  projects(identity: Identity) {
+    return this.config.value.projects
+      .filter((p) => permissions(p, identity).view)
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        root: p.root,
+        permissions: permissions(p, identity),
+        activeCount: [...this.sessions.values()].filter(
+          (s) => s.projectId === p.id && s.status === "running"
+        ).length
+      }));
+  }
+  async rateLimits(identity: Identity): Promise<CodexRateLimits> {
+    if (
+      !identity.elevated &&
+      !this.config.value.projects.some((p) => permissions(p, identity).view)
+    )
+      throw new ConsoleError(403, "PROJECT_FORBIDDEN", "No authorized projects.");
+    if (this.limitsCache && Date.now() - this.limitsCache.fetchedAt < 15_000)
+      return this.limitsCache;
+    const raw = await this.rpc().request<any>("account/rateLimits/read", {});
+    this.limitsCache = normalizeRateLimits(raw);
+    return this.limitsCache;
+  }
+  async consumeRateLimitReset(identity: Identity, requestId: string, creditId?: string) {
+    if (!identity.elevated)
+      throw new ConsoleError(
+        403,
+        "ADMIN_REQUIRED",
+        "Only a administrator may consume a shared reset credit."
+      );
+    if (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(requestId))
+      throw new ConsoleError(400, "INVALID_REQUEST_ID", "A valid idempotency key is required.");
+    if (
+      creditId !== undefined &&
+      (typeof creditId !== "string" || !creditId || creditId.length > 256)
+    )
+      throw new ConsoleError(400, "INVALID_CREDIT_ID", "Invalid reset credit id.");
+    return this.receipts.run(`${identity.uuid}:rate-limit-reset:${requestId}`, async () => {
+      const result = await this.rpc().request<any>("account/rateLimitResetCredit/consume", {
+        idempotencyKey: requestId,
+        ...(creditId ? { creditId } : {})
+      });
+      this.limitsCache = undefined;
+      const rateLimits = await this.rateLimits(identity);
+      return {
+        outcome: typeof result?.outcome === "string" ? result.outcome : "unknown",
+        rateLimits
+      };
+    });
+  }
+
+  async models(identity: Identity) {
+    if (
+      !this.config.value.projects.some((p) => permissions(p, identity).view) &&
+      !identity.elevated
+    )
+      throw new ConsoleError(403, "PROJECT_FORBIDDEN", "No authorized projects.");
+    if (!this.modelsCache || Date.now() - this.modelsCache.at > 60000) {
+      const result = await this.rpc().request<any>("model/list", {
+        limit: 100,
+        includeHidden: false
+      });
+      this.modelsCache = { at: Date.now(), data: result.data || [] };
+    }
+    return { data: this.modelsCache.data };
+  }
+  async listThreads(identity: Identity, projectId: string, cursor?: string) {
+    const project = this.project(identity, projectId);
+    const result = await this.rpc().request<any>("thread/list", {
+      cwd: project.root,
+      limit: 40,
+      cursor: cursor || null,
+      archived: false,
+      sortKey: "updated_at"
+    });
+    const list = [];
+    for (const thread of result.data || []) {
+      if (await this.sameRoot(project, thread.cwd))
+        list.push({
+          id: thread.id,
+          title: threadTitle(thread),
+          status: runtimeStatus(thread),
+          updatedAt: thread.updatedAt
+        });
+    }
+    return { data: list, nextCursor: result.nextCursor || null };
+  }
+  private async sameRoot(project: Project, cwd: unknown): Promise<boolean> {
+    if (typeof cwd !== "string") return false;
+    return (await fs.realpath(cwd).catch(() => "")) === project.root;
+  }
+  private async verifyThread(project: Project, id: string): Promise<any> {
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(id))
+      throw new ConsoleError(400, "INVALID_THREAD", "Invalid thread id.");
+    if ((await fs.realpath(project.root).catch(() => "")) !== project.root)
+      throw new ConsoleError(
+        409,
+        "ROOT_CHANGED",
+        "Project root changed; reconfigure before continuing."
+      );
+    const { thread } = await this.rpc().request<any>("thread/read", {
+      threadId: id,
+      includeTurns: false
+    });
+    if (!thread || !(await this.sameRoot(project, thread.cwd)))
+      throw new ConsoleError(
+        403,
+        "THREAD_FORBIDDEN",
+        "Conversation does not belong to this project."
+      );
+    return thread;
+  }
+  private trim(session: Session): void {
+    let size = [...session.items.values()].reduce((n, i) => n + i.text.length, 0);
+    while (session.items.size > 200 || size > 512 * 1024) {
+      const id = session.items.keys().next().value as string;
+      size -= session.items.get(id)!.text.length;
+      session.items.delete(id);
+      session.truncated = true;
+    }
+  }
+  private evict(): void {
+    if (this.sessions.size < 60) return;
+    const oldest = [...this.sessions.values()]
+      .filter(
+        (s) =>
+          s.status !== "running" && ![...this.pending.values()].some((p) => p.threadId === s.id)
+      )
+      .sort((a, b) => a.touched - b.touched)[0];
+    if (!oldest) throw new ConsoleError(503, "SESSION_LIMIT", "Too many active conversations.");
+    this.sessions.delete(oldest.id);
+    // Do not unsubscribe/unload desktop-owned work just because a browser changes projects.
+  }
+  private async open(project: Project, id: string): Promise<Session> {
+    const current = this.sessions.get(id);
+    if (current && current.projectId === project.id) {
+      current.touched = Date.now();
+      return current;
+    }
+    const inFlight = this.opening.get(id);
+    if (inFlight) return inFlight;
+    const promise = (async () => {
+      const thread = await this.verifyThread(project, id);
+      this.evict();
+      const session: Session = {
+        id,
+        projectId: project.id,
+        title: threadTitle(thread),
+        status: runtimeStatus(thread),
+        items: new Map(),
+        truncated: false,
+        touched: Date.now()
+      };
+      this.sessions.set(id, session);
+      try {
+        const resumed = await this.rpc().request<any>("thread/resume", {
+          threadId: id,
+          excludeTurns: true
+        });
+        session.status = runtimeStatus(resumed.thread || thread);
+        const history = await this.rpc().request<any>("thread/turns/list", {
+          threadId: id,
+          limit: 20,
+          sortDirection: "desc",
+          itemsView: "full"
+        });
+        const live = new Map(session.items);
+        session.items.clear();
+        for (const turn of [...(history.data || [])].reverse()) {
+          if (turn.status === "inProgress") session.turnId = turn.id;
+          for (const raw of turn.items || []) {
+            const item = normalizeItem(raw);
+            session.items.set(item.id, item);
+          }
+        }
+        for (const [key, item] of live) session.items.set(key, item);
+        session.truncated = Boolean(history.nextCursor);
+        this.trim(session);
+        return session;
+      } catch (error) {
+        this.sessions.delete(id);
+        throw error;
+      }
+    })();
+    this.opening.set(id, promise);
+    try {
+      return await promise;
+    } finally {
+      this.opening.delete(id);
+    }
+  }
+  async snapshot(identity: Identity, projectId: string, id: string) {
+    const project = this.project(identity, projectId);
+    await this.verifyThread(project, id);
+    const session = await this.open(project, id);
+    this.flushDeltas();
+    return {
+      id,
+      title: session.title,
+      status: session.status,
+      turnId: session.turnId,
+      items: [...session.items.values()],
+      pending: [...this.pending.values()]
+        .filter((p) => p.threadId === id)
+        .map((p) => this.publicPending(p)),
+      truncated: session.truncated,
+      cursor: this.hub.cursor
+    };
+  }
+  async createThread(identity: Identity, projectId: string, title?: string) {
+    const project = this.project(identity, projectId, "send");
+    if (title !== undefined && (typeof title !== "string" || title.length > 120))
+      throw new ConsoleError(400, "INVALID_TITLE", "Title is too long.");
+    if ((await fs.realpath(project.root).catch(() => "")) !== project.root)
+      throw new ConsoleError(
+        409,
+        "ROOT_CHANGED",
+        "Project root changed; reconfigure before continuing."
+      );
+    const result = await this.rpc().request<any>("thread/start", {
+      cwd: project.root,
+      runtimeWorkspaceRoots: [project.root],
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandbox: "workspace-write"
+    });
+    const thread = result.thread;
+    if (!(await this.sameRoot(project, thread.cwd)))
+      throw new ConsoleError(502, "ROOT_MISMATCH", "Codex returned a different working directory.");
+    if (title?.trim())
+      await this.rpc().request("thread/name/set", { threadId: thread.id, name: title.trim() });
+    this.evict();
+    this.sessions.set(thread.id, {
+      id: thread.id,
+      projectId,
+      title: title?.trim() || threadTitle(thread),
+      status: runtimeStatus(thread),
+      items: new Map(),
+      touched: Date.now(),
+      truncated: false
+    });
+    return {
+      id: thread.id,
+      title: title?.trim() || threadTitle(thread),
+      status: runtimeStatus(thread)
+    };
+  }
+  async send(identity: Identity, projectId: string, id: string, input: any) {
+    const project = this.project(identity, projectId, "send");
+    if (
+      !input ||
+      typeof input.text !== "string" ||
+      !input.text.trim() ||
+      input.text.length > 64000 ||
+      typeof input.requestId !== "string" ||
+      !/^[a-zA-Z0-9_-]{8,100}$/.test(input.requestId)
+    )
+      throw new ConsoleError(
+        400,
+        "INVALID_MESSAGE",
+        "A non-empty message and unique request id are required (max 64000 characters)."
+      );
+    if (input.mode !== undefined && !["code", "plan"].includes(input.mode))
+      throw new ConsoleError(400, "INVALID_MODE", "Unknown collaboration mode.");
+    const thread = await this.verifyThread(project, id);
+    const session = await this.open(project, id);
+    const { data: models } = await this.models(identity);
+    const model = input.model
+      ? models.find((m: any) => m.model === input.model || m.id === input.model)
+      : models.find((m: any) => m.isDefault) || models[0];
+    if (!model)
+      throw new ConsoleError(400, "MODEL_UNAVAILABLE", "Select an available Codex model.");
+    if (
+      input.effort &&
+      !(model.supportedReasoningEfforts || []).some((e: any) => e.reasoningEffort === input.effort)
+    )
+      throw new ConsoleError(
+        400,
+        "EFFORT_UNAVAILABLE",
+        "This reasoning level is not supported by the selected model."
+      );
+    const content: any[] = [{ type: "text", text: input.text }];
+    if (
+      input.attachments !== undefined &&
+      (!Array.isArray(input.attachments) || input.attachments.length > 5)
+    )
+      throw new ConsoleError(
+        400,
+        "INVALID_ATTACHMENTS",
+        "At most five uploaded attachments are allowed."
+      );
+    for (const rel of input.attachments || []) {
+      this.project(identity, projectId, "files");
+      if (typeof rel !== "string")
+        throw new ConsoleError(400, "INVALID_ATTACHMENTS", "Invalid attachment.");
+      const absolute = await attachmentPath(project.root, rel);
+      if (/\.(png|jpe?g|webp)$/i.test(absolute))
+        content.push({ type: "localImage", path: absolute });
+      else content[0].text += `\n\nAttached project file: ${rel}`;
+    }
+    return this.receipts.run(`${identity.uuid}:${id}:${input.requestId}`, async () => {
+      if (
+        runtimeStatus(thread) === "running" ||
+        session.status === "running" ||
+        this.reservations.has(projectId)
+      )
+        throw new ConsoleError(
+          409,
+          "THREAD_BUSY",
+          "This conversation or project is busy. Refresh before sending again."
+        );
+      if (
+        [...this.sessions.values()].filter((s) => s.status === "running").length +
+          this.reservations.size >=
+        this.config.value.maxConcurrentTurns
+      )
+        throw new ConsoleError(
+          409,
+          "CONCURRENCY_LIMIT",
+          "The configured concurrent task limit is reached."
+        );
+      if (
+        [...this.sessions.values()].some((s) => s.projectId === projectId && s.status === "running")
+      )
+        throw new ConsoleError(
+          409,
+          "PROJECT_BUSY",
+          "Only one task may modify this project at a time. Use a separate worktree project for parallel edits."
+        );
+      this.reservations.add(projectId);
+      try {
+        const running = await this.rpc().request<any>("thread/list", {
+          cwd: project.root,
+          limit: 100,
+          archived: false
+        });
+        if ((running.data || []).some((t: any) => runtimeStatus(t) === "running"))
+          throw new ConsoleError(
+            409,
+            "PROJECT_BUSY",
+            "A task is already running in this project, possibly in another Codex client."
+          );
+        const result = await this.rpc().request<any>("turn/start", {
+          threadId: id,
+          input: content,
+          cwd: project.root,
+          runtimeWorkspaceRoots: [project.root],
+          approvalPolicy: "on-request",
+          approvalsReviewer: "user",
+          model: model.model,
+          sandboxPolicy: {
+            type: "workspaceWrite",
+            writableRoots: [project.root],
+            networkAccess: false,
+            excludeTmpdirEnvVar: true,
+            excludeSlashTmp: true
+          },
+          collaborationMode: {
+            mode: input.mode === "plan" ? "plan" : "default",
+            settings: {
+              model: model.model,
+              reasoning_effort: input.effort || model.defaultReasoningEffort || null,
+              developer_instructions: null
+            }
+          }
+        });
+        session.turnId = result.turn.id;
+        if (session.lastCompletedTurnId !== result.turn.id)
+          session.status = result.turn.status === "inProgress" ? "running" : result.turn.status;
+        this.hub.publish({
+          type: "status",
+          projectId,
+          threadId: id,
+          payload: { status: session.status, turnId: session.turnId }
+        });
+        return { turnId: result.turn.id, status: session.status };
+      } finally {
+        this.reservations.delete(projectId);
+      }
+    });
+  }
+  async interrupt(identity: Identity, projectId: string, id: string) {
+    const project = this.project(identity, projectId, "send");
+    await this.verifyThread(project, id);
+    const session = await this.open(project, id);
+    if (!session.turnId || session.status !== "running")
+      throw new ConsoleError(
+        409,
+        "NOT_RUNNING",
+        "There is no known active turn to interrupt. Refresh first."
+      );
+    await this.rpc().request("turn/interrupt", { threadId: id, turnId: session.turnId });
+    return { ok: true };
+  }
+  private publicPending(p: Pending) {
+    return {
+      id: p.id,
+      kind: p.kind,
+      threadId: p.threadId,
+      turnId: p.turnId,
+      description: p.description,
+      questions: p.questions,
+      decisions:
+        p.kind === "command" || p.kind === "file"
+          ? (p.params.availableDecisions || ["accept", "decline", "cancel"]).filter(
+              (d: unknown) => typeof d === "string" && ["accept", "decline", "cancel"].includes(d)
+            )
+          : []
+    };
+  }
+  async answer(identity: Identity, projectId: string, id: string, pendingId: string, answer: any) {
+    const p = this.pending.get(pendingId);
+    const project = this.project(identity, projectId, p?.kind === "question" ? "send" : "approve");
+    await this.verifyThread(project, id);
+    if (!p || this.pending.get(pendingId) !== p || p.threadId !== id)
+      throw new ConsoleError(
+        409,
+        "APPROVAL_EXPIRED",
+        "This request has already been resolved or expired."
+      );
+    if (p.kind === "unsupported")
+      throw new ConsoleError(
+        409,
+        "DESKTOP_REQUIRED",
+        "This request type must be handled in a compatible Codex client."
+      );
+    let result: any;
+    if (p.kind === "question") {
+      if (!answer?.answers || typeof answer.answers !== "object")
+        throw new ConsoleError(400, "INVALID_ANSWER", "Answers are required.");
+      const valid: Record<string, { answers: string[] }> = {};
+      for (const q of p.questions || []) {
+        const a = answer.answers[q.id]?.answers;
+        if (
+          !Array.isArray(a) ||
+          a.length === 0 ||
+          a.length > 20 ||
+          a.some((v) => typeof v !== "string" || v.length > 8192)
+        )
+          throw new ConsoleError(
+            400,
+            "INVALID_ANSWER",
+            "Each question needs a bounded text answer."
+          );
+        valid[q.id] = { answers: a };
+      }
+      result = { answers: valid };
+    } else {
+      const decisions = this.publicPending(p).decisions;
+      if (!decisions.includes(answer?.decision))
+        throw new ConsoleError(400, "INVALID_DECISION", "Select one of the available decisions.");
+      result = { decision: answer.decision };
+    }
+    this.rpc().respond(p.rawId, result);
+    this.pending.delete(pendingId);
+    this.hub.publish({
+      type: "approvalResolved",
+      projectId,
+      threadId: id,
+      payload: { id: pendingId }
+    });
+    return { ok: true };
+  }
+  private serverRequest(message: any): void {
+    const { method, params = {}, id: rawId } = message;
+    const session = this.sessions.get(params.threadId);
+    if (!session) {
+      this.peer?.reject(rawId, {
+        code: -32602,
+        message: "Thread is not attached to an authorized project console."
+      });
+      return;
+    }
+    const kind =
+      method === "item/commandExecution/requestApproval"
+        ? "command"
+        : method === "item/fileChange/requestApproval"
+          ? "file"
+          : method === "item/tool/requestUserInput"
+            ? "question"
+            : "unsupported";
+    if (this.pending.size >= 200) {
+      this.peer?.reject(rawId, { code: -32000, message: "Pending request limit reached." });
+      return;
+    }
+    const p: Pending = {
+      id: randomUUID(),
+      rawId,
+      method,
+      params,
+      kind,
+      threadId: session.id,
+      turnId: params.turnId,
+      description: String(params.command || params.reason || method).slice(0, 16000),
+      questions: kind === "question" ? params.questions : undefined
+    };
+    this.pending.set(p.id, p);
+    this.hub.publish({
+      type: "approval",
+      projectId: session.projectId,
+      threadId: session.id,
+      payload: this.publicPending(p)
+    });
+  }
+  private notification({ method, params: p = {} }: any): void {
+    if (method === "serverRequest/resolved") {
+      for (const [key, pending] of this.pending)
+        if (pending.rawId === p.requestId) {
+          this.pending.delete(key);
+          const session = this.sessions.get(pending.threadId);
+          if (session)
+            this.hub.publish({
+              type: "approvalResolved",
+              projectId: session.projectId,
+              threadId: session.id,
+              payload: { id: key }
+            });
+        }
+      return;
+    }
+    if (
+      method === "account/rateLimits/updated" ||
+      method === "account/rateLimitResetCredit/updated"
+    ) {
+      this.limitsCache = undefined;
+      this.hub.publish({ type: "limits", payload: { stale: true } });
+      return;
+    }
+    const id = p.threadId || p.thread?.id;
+    const session = this.sessions.get(id);
+    if (!session) return;
+    session.touched = Date.now();
+    if (method === "error") {
+      const item: TimelineItem = {
+        id: `error-${randomUUID()}`,
+        type: "other",
+        text: String(p.error?.message || "Codex reported an error.").slice(0, MAX_ITEM_CHARS),
+        status: "failed"
+      };
+      session.items.set(item.id, item);
+      this.trim(session);
+      this.hub.publish({ type: "item", projectId: session.projectId, threadId: id, payload: item });
+      return;
+    }
+    if (
+      method === "thread/status/changed" ||
+      method === "turn/started" ||
+      method === "turn/completed"
+    ) {
+      this.flushDeltas();
+      session.status =
+        method === "turn/started"
+          ? "running"
+          : method === "turn/completed"
+            ? p.turn?.status === "failed"
+              ? "failed"
+              : "idle"
+            : runtimeStatus({ status: p.status });
+      if (p.turn?.id) session.turnId = p.turn.id;
+      if (method === "turn/completed") session.lastCompletedTurnId = p.turn?.id;
+      if (method === "turn/completed") {
+        for (const [key, pending] of this.pending)
+          if (pending.threadId === id) {
+            this.pending.delete(key);
+            this.hub.publish({
+              type: "approvalResolved",
+              projectId: session.projectId,
+              threadId: id,
+              payload: { id: key }
+            });
+          }
+      }
+      this.hub.publish({
+        type: "status",
+        projectId: session.projectId,
+        threadId: id,
+        payload: { status: session.status, turnId: session.turnId }
+      });
+      return;
+    }
+    if (method === "item/started" || method === "item/completed") {
+      this.flushDeltas();
+      const item = normalizeItem(p.item);
+      session.items.set(item.id, item);
+      this.trim(session);
+      this.hub.publish({ type: "item", projectId: session.projectId, threadId: id, payload: item });
+      return;
+    }
+    if (
+      method === "item/agentMessage/delta" ||
+      method === "item/commandExecution/outputDelta" ||
+      method === "item/plan/delta"
+    ) {
+      let item = session.items.get(p.itemId);
+      if (!item) {
+        item = {
+          id: p.itemId,
+          type: method.includes("agentMessage")
+            ? "agentMessage"
+            : method.includes("plan")
+              ? "plan"
+              : "commandExecution",
+          text: "",
+          ...(method.includes("agentMessage") ? { role: "assistant" as const } : {})
+        };
+        session.items.set(item.id, item);
+        this.hub.publish({
+          type: "item",
+          projectId: session.projectId,
+          threadId: id,
+          payload: { ...item }
+        });
+      }
+      const text = String(p.delta || "").slice(0, Math.max(0, MAX_ITEM_CHARS - item.text.length));
+      if (!text) {
+        item.truncated = true;
+        return;
+      }
+      const key = `${id}:${item.id}`;
+      const batch = this.deltas.get(key) || {
+        threadId: id,
+        itemId: item.id,
+        offset: item.text.length,
+        text: ""
+      };
+      item.text += text;
+      batch.text += text;
+      this.deltas.set(key, batch);
+      this.trim(session);
+      if (!this.deltaTimer) this.deltaTimer = setTimeout(() => this.flushDeltas(), 100);
+    }
+  }
+  private flushDeltas(): void {
+    if (this.deltaTimer) clearTimeout(this.deltaTimer);
+    this.deltaTimer = undefined;
+    for (const batch of this.deltas.values()) {
+      const session = this.sessions.get(batch.threadId);
+      if (session)
+        this.hub.publish({
+          type: "delta",
+          projectId: session.projectId,
+          threadId: batch.threadId,
+          payload: { itemId: batch.itemId, text: batch.text, offset: batch.offset }
+        });
+    }
+    this.deltas.clear();
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "transport": { "type": "unix", "endpoint": "/run/user/1000/codex/app-server.sock" },
+  "maxConcurrentTurns": 2,
+  "projects": [
+    {
+      "id": "project-one",
+      "name": "项目一",
+      "root": "/srv/projects/project-one",
+      "grants": [
+        { "userId": "REPLACE_WITH_WEBUI_USER_ID", "permissions": ["view", "send", "approve", "files"] }
+      ]
+    }
+  ]
+}

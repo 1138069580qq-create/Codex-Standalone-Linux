@@ -1,0 +1,33 @@
+{
+  "name": "codex-standalone-linux",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Attach-only, low-bandwidth Codex WebUI for Linux. Independent of ElementsPanel.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.14"
+  },
+  "scripts": {
+    "start": "node --import tsx src/server.ts",
+    "user:add": "node --import tsx scripts/user.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "test:live": "tsx --test tests/live.existing.ts",
+    "test:real": "tsx --test tests/live.real.ts",
+    "check": "tsc --noEmit && node --check public/app.js"
+  },
+  "dependencies": {
+    "@koa/router": "15.7.0",
+    "koa": "^2.16.3",
+    "koa-bodyparser": "^4.4.1",
+    "tsx": "^4.20.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/koa": "^2.15.0",
+    "@types/koa__router": "^12.0.0",
+    "@types/koa-bodyparser": "^4.3.12",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.8.3"
+  }
+}
