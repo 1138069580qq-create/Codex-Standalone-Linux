@@ -1,18 +1,84 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><meta name="description" content="独立、低带宽的 Linux Codex 控制台"><title>Codex / 工作台</title><link rel="stylesheet" href="/style.css"><script src="/state.js" defer></script><script src="/app.js" defer></script></head>
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark">
+  <title>Codex</title><link rel="stylesheet" href="/style.css"><script src="/state.js" defer></script><script src="/app.js" defer></script>
+</head>
 <body>
 <section id="login-view" class="login-shell">
-  <div class="login-story"><div class="wordmark"><span class="brand-icon">c_</span> CODEX <span class="muted">/ WEBUI</span></div><p class="eyebrow">YOUR WORKSPACE. ANYWHERE.</p><h1>专注代码，<br>不必守在桌面前。</h1><p class="story-copy">连接已有 Codex。让任务、变更与审批，<br>在一个轻量的工作台里保持清晰。</p><div class="features"><span>↗ 独立部署</span><span>≋ 增量文本流</span><span>⌘ 项目授权</span></div><p class="footnote">Linux · 自托管 · 不启动第二个 Codex</p></div>
-  <form id="login-form" class="login-card"><span class="eyebrow">WELCOME BACK</span><h2>登录工作台</h2><p class="muted">使用本机管理员创建的独立账号。</p><label>用户名<input id="username" name="username" autocomplete="username" required maxlength="80" autofocus></label><label>密码<input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256"></label><p id="login-error" class="error" role="alert"></p><button class="primary wide" type="submit">进入工作台 <span>→</span></button><p class="footnote">首次使用？在 Linux 终端执行 <code>npm run user:add</code> 创建管理员。此账号与 Codex 账号相互独立。</p></form>
+  <div class="login-story"><div class="wordmark"><span class="brand-icon">c_</span> CODEX <span class="muted">/ WEBUI</span></div><h1>Codex</h1><p class="muted">远程工作台</p></div>
+  <form id="login-form" class="login-card"><h2>登录</h2>
+    <label>用户名<input id="username" name="username" autocomplete="username" required maxlength="80" autofocus></label>
+    <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
+    <p id="login-error" class="error" role="alert"></p><button class="primary wide" type="submit">登录</button>
+  </form>
 </section>
 <div id="workspace" hidden>
-  <header class="topbar"><button id="menu-toggle" class="icon mobile" aria-label="项目列表">☰</button><div class="wordmark"><span class="brand-icon">c_</span> CODEX <span class="muted">/ WEBUI</span></div><div class="top-spacer"></div><span id="connection" class="badge">未连接</span><button id="connect" class="small" hidden>连接 Codex</button><button id="settings" class="small" hidden>设置</button><button id="inspect-toggle" class="icon compact" aria-label="打开检查面板">☷</button><span id="user-name" class="muted desktop"></span><button id="logout" class="small quiet">退出</button></header>
-  <div class="layout"><aside id="sidebar" class="sidebar"><div class="section-title">工作空间 <span id="project-count" class="count">0</span></div><label class="sr-only" for="project-select">选择项目</label><select id="project-select"></select><p id="project-root" class="path"></p><button id="new-thread" class="new-task">＋ 新建任务</button><div class="section-title task-heading">最近任务 <button id="refresh-threads" class="icon" aria-label="刷新任务">↻</button></div><input id="thread-filter" class="search" placeholder="搜索已加载任务…" aria-label="搜索任务"><nav id="thread-list" aria-label="任务列表"></nav><button id="more-threads" class="small wide" hidden>加载更多</button><div class="sidebar-bottom"><span class="live-dot"></span> ATTACH ONLY<p>只连接已有实例 · 不录屏</p></div></aside>
-  <main class="main"><div class="task-header"><div><p id="breadcrumb" class="eyebrow">WORKSPACE / OVERVIEW</p><h1 id="thread-title">准备好，开始你的下一步。</h1></div><span id="task-status" class="badge">待命</span></div><div id="notice" class="notice" role="status" hidden></div><div id="timeline" class="timeline" aria-label="任务输出" tabindex="0"><div id="empty" class="empty-state"><div class="empty-symbol">⌘</div><h2>一个轻量的远程工作台</h2><p>选择项目与任务，或从一个新的想法开始。<br>输出以文本增量传输，无需持续截屏。</p><div class="quick-grid"><article><strong>01 / 连接</strong><p>在设置中选择已有的<br>Codex socket 或 WebSocket</p></article><article><strong>02 / 工作</strong><p>选定项目，查看上下文<br>继续现有任务</p></article><article><strong>03 / 确认</strong><p>查看文件与 Diff<br>逐条处理必要审批</p></article></div></div></div><div id="approvals" class="approvals"></div><form id="composer" class="composer"><div id="attachments" class="attachment-list"></div><label for="prompt" class="sr-only">发送给 Codex 的消息</label><textarea id="prompt" placeholder="描述你想完成的任务…" rows="3" maxlength="64000"></textarea><div class="composer-controls"><div class="compose-selects"><select id="model" aria-label="模型"><option value="">默认模型</option></select><select id="effort" aria-label="推理强度"><option value="">默认强度</option></select><select id="mode" aria-label="协作模式"><option value="code">执行</option><option value="plan">规划</option></select></div><button id="attach" type="button" class="icon" aria-label="上传附件">＋</button><input id="upload" type="file" hidden><button id="stop" type="button" class="danger" hidden>停止</button><button id="send" type="submit" class="primary">发送 ↑</button></div><div class="composer-footer"><span id="stream-state">按需连接 · 不后台轮询</span><span>Ctrl / ⌘ + Enter 发送</span></div></form></main>
-  <aside id="inspector" class="inspector"><div class="section-title">检查面板 <button id="close-inspector" class="icon compact" aria-label="关闭检查面板">×</button></div><div class="inspector-tabs" role="tablist"><button class="active" data-panel="quota" role="tab" aria-selected="true">账号额度</button><button data-panel="files" role="tab" aria-selected="false">文件</button><button data-panel="diff" role="tab" aria-selected="false">Diff</button></div><section id="panel-quota" class="inspector-panel"><div class="panel-title"><h2>共享账号</h2><button id="refresh-quota" class="icon" aria-label="刷新额度">↻</button></div><p class="muted">实际窗口由 Codex 返回，非估算。</p><div id="quota-content" class="muted">连接后读取账号额度。</div><div class="info-card"><span>低带宽模式</span><h3>只传输有变化的部分</h3><p>增量合并 · 断线续传<br>静态压缩 · 无外部字体 / CDN</p><span id="network-stats" class="mono">本页 SSE 0 B</span></div></section><section id="panel-files" class="inspector-panel" hidden><div class="panel-title"><h2>项目文件</h2><button id="files-up" class="icon" aria-label="上级目录">↑</button></div><p id="file-path" class="path">/</p><button id="refresh-files" class="small wide">刷新当前目录</button><div id="file-list"></div><p class="footnote">文件按需加载。上传最大 4 MiB，下载最大 8 MiB；隐藏凭据文件及符号链接。</p></section><section id="panel-diff" class="inspector-panel" hidden><div class="panel-title"><h2>未提交变更</h2><button id="refresh-diff" class="icon" aria-label="刷新差异">↻</button></div><p class="muted">只读 · 按需读取 · 最大 256 KiB</p><pre id="diff-content" class="diff">点击刷新读取 Git Diff。</pre></section></aside></div>
+  <header class="topbar">
+    <button id="menu-toggle" class="icon mobile" aria-label="项目列表">☰</button>
+    <div class="wordmark"><span class="brand-icon">c_</span> CODEX <span class="muted">/ WEBUI</span></div><div class="top-spacer"></div>
+    <span id="connection" class="badge">未连接</span><button id="connect" class="small" hidden>连接 Codex</button>
+    <button id="settings" class="small" hidden>设置</button><button id="inspect-toggle" class="icon compact" aria-label="打开检查面板">☷</button>
+    <span id="user-name" class="muted desktop"></span><button id="logout" class="small quiet">退出</button>
+  </header>
+  <div class="layout">
+    <aside id="sidebar" class="sidebar">
+      <div class="section-title">项目 <span id="project-count" class="count">0</span></div>
+      <label class="sr-only" for="project-select">选择项目</label><select id="project-select"></select><p id="project-root" class="path"></p>
+      <button id="new-thread" class="new-task">＋ 新建任务</button>
+      <div class="section-title task-heading">任务 <button id="refresh-threads" class="icon" aria-label="刷新任务">↻</button></div>
+      <input id="thread-filter" class="search" placeholder="搜索任务" aria-label="搜索任务"><nav id="thread-list" aria-label="任务列表"></nav>
+      <button id="more-threads" class="small wide" hidden>加载更多</button>
+      <button id="sidebar-plugins" class="sidebar-bottom sidebar-tool">◇ 技能与插件</button>
+    </aside>
+    <main class="main">
+      <div class="task-header"><div><p id="breadcrumb" class="eyebrow"></p><h1 id="thread-title">新任务</h1></div><span id="task-status" class="badge">待命</span></div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <div id="timeline" class="timeline" aria-label="任务输出" tabindex="0"><div id="empty" class="empty-state"><h2>新任务</h2><p>输入消息，或用 / 选择技能</p></div></div>
+      <div id="approvals" class="approvals"></div>
+      <form id="composer" class="composer">
+        <section id="composer-menu" class="composer-menu" aria-label="技能与命令" hidden>
+          <div class="menu-heading"><strong id="menu-title">添加</strong><button id="refresh-menu" type="button" class="icon" aria-label="刷新技能与插件">↻</button><button id="close-menu" type="button" class="icon" aria-label="关闭菜单">×</button></div>
+          <input id="menu-query" class="menu-search" placeholder="搜索技能、插件或命令" aria-label="搜索技能、插件或命令" autocomplete="off">
+          <div id="menu-list" role="listbox" aria-label="技能与命令列表"></div><p id="menu-status" class="footnote" role="status"></p>
+        </section>
+        <div id="attachments" class="attachment-list"></div>
+        <label for="prompt" class="sr-only">发送给 Codex 的消息</label>
+        <textarea id="prompt" placeholder="发送消息，输入 / 选择技能" rows="3" maxlength="64000" aria-controls="menu-list" aria-expanded="false"></textarea>
+        <div class="composer-controls">
+          <button id="attach" type="button" class="icon" aria-label="添加文件、技能或插件" aria-expanded="false" aria-controls="composer-menu">＋</button>
+          <input id="upload" type="file" multiple hidden>
+          <div class="compose-selects"><select id="model" aria-label="模型"><option value="">默认模型</option></select><select id="effort" aria-label="推理强度"><option value="">默认强度</option></select><select id="mode" aria-label="协作模式"><option value="code">执行</option><option value="plan">计划</option></select></div>
+          <button id="stop" type="button" class="danger" hidden>停止</button><button id="send" type="submit" class="primary">发送 ↑</button>
+        </div>
+        <div class="composer-footer"><select id="access" aria-label="访问权限"><option value="default">默认权限</option><option value="read-only">只读</option><option value="full">完全访问</option></select><span id="settings-source" hidden></span><button id="follow-desktop" type="button" class="small" hidden>跟随桌面</button><span id="stream-state">Ctrl / ⌘ + Enter 发送</span></div>
+      </form>
+    </main>
+    <aside id="inspector" class="inspector">
+      <div class="section-title">详情 <button id="close-inspector" class="icon compact" aria-label="关闭检查面板">×</button></div>
+      <div class="inspector-tabs" role="tablist"><button class="active" data-panel="quota" role="tab" aria-selected="true">账号额度</button><button data-panel="files" role="tab" aria-selected="false">文件</button><button data-panel="diff" role="tab" aria-selected="false">Diff</button></div>
+      <section id="panel-quota" class="inspector-panel"><div class="panel-title"><h2>额度</h2><button id="refresh-quota" class="icon" aria-label="刷新额度">↻</button></div><div id="quota-content" class="muted">尚未读取</div></section>
+      <section id="panel-files" class="inspector-panel" hidden><div class="panel-title"><h2>项目文件</h2><button id="files-up" class="icon" aria-label="上级目录">↑</button></div><p id="file-path" class="path">/</p><button id="refresh-files" class="small wide">刷新</button><div id="file-list"></div></section>
+      <section id="panel-diff" class="inspector-panel" hidden><div class="panel-title"><h2>Diff</h2><button id="refresh-diff" class="icon" aria-label="刷新差异">↻</button></div><pre id="diff-content" class="diff">点击刷新</pre></section>
+    </aside>
+  </div>
 </div>
-<dialog id="new-thread-dialog"><form id="new-thread-form"><div class="dialog-header"><h2>新建任务</h2><button id="cancel-new-thread" type="button" class="icon" aria-label="取消新建">×</button></div><label>任务标题<input id="new-thread-title" maxlength="120" placeholder="可留空，后续由 Codex 命名" autocomplete="off"></label><p class="footnote">将在当前项目创建真实 Codex 任务。创建本身不调用模型。</p><div class="dialog-actions"><button type="submit" class="primary">创建任务</button></div></form></dialog>
-<dialog id="settings-dialog"><form id="config-form"><div class="dialog-header"><div><p class="eyebrow">ADMINISTRATION</p><h2>连接与项目设置</h2></div><button id="close-settings" type="button" class="icon" aria-label="关闭设置">×</button></div><p class="notice">只连接已有 Codex。发现失败不会启动实例；配置保存后需手动连接。不要在此粘贴 token 或密码。</p><div class="form-row"><label>接口类型<select id="transport"><option value="unix">Unix socket</option><option value="websocket">WebSocket</option></select></label><label>最大并发<input id="concurrency" type="number" min="1" max="8" value="2" required></label></div><label>已有接口地址<input id="endpoint" placeholder="/run/user/1000/codex/app-server.sock" maxlength="2048"></label><label>Bearer token 环境变量名（可选）<input id="token-env" placeholder="CODEX_ENDPOINT_TOKEN" pattern="[A-Z_][A-Z0-9_]{0,100}"></label><div class="form-row"><label class="check"><input id="enabled" type="checkbox">启用连接配置</label><button id="discover" type="button" class="small">扫描已有接口</button></div><div id="candidates"></div><label>项目与授权 JSON<textarea id="projects-json" rows="9" spellcheck="false" class="mono" required></textarea></label><p class="footnote">root 必须为 Linux 上已有的绝对路径；不允许目录重叠。grants 中 userId 使用下方账号 ID，权限可选 view / send / approve / files（后三者需同时有 view）。管理员可访问全部项目。</p><div class="dialog-actions"><button id="disconnect" type="button" class="danger">断开 Codex</button><button type="submit" class="primary">保存配置</button></div></form><hr><section><h2>独立账号</h2><p class="muted">账号修改立即使旧会话失效。保留至少一位管理员。</p><div id="users-list"></div><form id="user-form"><input id="edit-user-id" type="hidden"><div class="form-row"><label>用户名<input id="new-username" required maxlength="80"></label><label>密码<input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="256" placeholder="至少 12 位；编辑时留空不变"></label></div><label class="check"><input id="new-admin" type="checkbox">管理员（拥有全部项目和账号配置权限）</label><div class="dialog-actions"><button id="cancel-edit-user" class="small" type="button">清空 / 新建</button><button class="primary" type="submit">保存账号</button></div></form></section></dialog>
+<dialog id="new-thread-dialog"><form id="new-thread-form"><div class="dialog-header"><h2>新建任务</h2><button id="cancel-new-thread" type="button" class="icon" aria-label="取消新建">×</button></div><label>标题<input id="new-thread-title" maxlength="120" autocomplete="off"></label><div class="dialog-actions"><button type="submit" class="primary">创建任务</button></div></form></dialog>
+<dialog id="info-dialog"><div class="dialog-header"><h2 id="info-title">详情</h2><button id="close-info" type="button" class="icon" aria-label="关闭详情">×</button></div><div id="info-content"></div></dialog>
+<dialog id="reference-dialog"><div class="dialog-header"><h2>项目文件与文件夹</h2><button id="close-references" type="button" class="icon" aria-label="关闭文件选择">×</button></div><div class="form-row"><button id="reference-up" type="button" class="small">上级目录</button><code id="reference-path">/</code><button id="reference-current" type="button" class="small">引用此文件夹</button></div><div id="reference-list"></div></dialog>
+<dialog id="confirm-dialog"><form id="confirm-form"><div class="dialog-header"><h2 id="confirm-title">确认</h2><button id="cancel-confirm" type="button" class="icon" aria-label="取消确认">×</button></div><p id="confirm-description" class="notice"></p><div class="dialog-actions"><button type="submit" class="danger">确认</button></div></form></dialog>
+<dialog id="goal-dialog"><form id="goal-form"><div class="dialog-header"><h2>目标</h2><button id="close-goal" type="button" class="icon" aria-label="关闭目标">×</button></div><label>目标内容<textarea id="goal-objective" rows="4" maxlength="4000" required></textarea></label><div class="dialog-actions"><button class="primary" type="submit">保存目标</button></div></form></dialog>
+<dialog id="settings-dialog">
+  <form id="config-form"><div class="dialog-header"><h2>设置</h2><button id="close-settings" type="button" class="icon" aria-label="关闭设置">×</button></div>
+    <div class="form-row"><label>接口类型<select id="transport"><option value="unix">Unix socket</option><option value="websocket">WebSocket</option></select></label><label>并发任务<input id="concurrency" type="number" min="1" max="8" value="2" required></label></div>
+    <label>Codex 接口<input id="endpoint" placeholder="/run/user/1000/codex/app-server.sock" maxlength="2048"></label>
+    <label>Token 环境变量名（可选）<input id="token-env" placeholder="CODEX_ENDPOINT_TOKEN" pattern="[A-Z_][A-Z0-9_]{0,100}"></label>
+    <div class="form-row"><label class="check"><input id="enabled" type="checkbox">启用</label><button id="discover" type="button" class="small">扫描接口</button></div><div id="candidates"></div>
+    <label>项目与用户授权 JSON<textarea id="projects-json" rows="9" spellcheck="false" class="mono" required></textarea></label>
+    <details><summary class="footnote">授权格式</summary><p class="footnote">root：Linux 已有绝对路径。grants：userId 对应下方账号 ID；权限为 view / send / approve / files，后三者须有 view。项目路径不能重叠，管理员可访问全部项目。</p></details>
+    <div class="dialog-actions"><button id="disconnect" type="button" class="danger">断开</button><button type="submit" class="primary">保存配置</button></div>
+  </form><hr>
+  <section><h2>账号</h2><div id="users-list"></div><form id="user-form"><input id="edit-user-id" type="hidden"><div class="form-row"><label>用户名<input id="new-username" required maxlength="80"></label><label>密码<input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="256" placeholder="至少 12 位；留空不修改"></label></div><label class="check"><input id="new-admin" type="checkbox">管理员</label><div class="dialog-actions"><button id="cancel-edit-user" class="small" type="button">新建账号</button><button class="primary" type="submit">保存账号</button></div></form></section>
+</dialog>
 <div id="toast" class="toast" role="alert" hidden></div>
 </body></html>

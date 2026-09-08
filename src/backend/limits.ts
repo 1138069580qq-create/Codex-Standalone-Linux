@@ -4,6 +4,7 @@ import path from "path";
 
 export interface CodexQuotaWindow {
   id: string;
+  bucketId?: string;
   name?: string;
   usedPercent: number;
   windowDurationMins?: number;
@@ -106,15 +107,16 @@ export function normalizeRateLimits(raw: unknown, fetchedAt = Date.now()): Codex
       if (input && (input.primary || input.secondary)) {
         for (const key of ["primary", "secondary"]) {
           const item = window(input[key], `${id}.${key}`, input.limitName);
-          if (item) windows.push(item);
+          if (item) { item.bucketId=id; if(typeof input.planType === "string") item.planType=input.planType.slice(0,80); windows.push(item); }
         }
       } else {
         const item = window(value, id, input?.limitName);
-        if (item) windows.push(item);
+        if (item) { item.bucketId=id; windows.push(item); }
       }
     }
   const legacy = object(input.rateLimits);
-  if (legacy) {
+  // The legacy snapshot mirrors a by-id bucket; never append it twice.
+  if (legacy && !windows.length) {
     for (const key of ["primary", "secondary"]) {
       const item = window(legacy[key], key, object(legacy[key])?.limitName);
       if (item && !windows.some((current) => current.id === item.id)) windows.push(item);
@@ -131,7 +133,9 @@ export function normalizeRateLimits(raw: unknown, fetchedAt = Date.now()): Codex
       (right.windowDurationMins || Number.MAX_SAFE_INTEGER)
   );
   return {
-    windows: windows.slice(0, 20),
+    windows: windows.filter((v,index,all)=>all.findIndex(other=>
+      other.bucketId===v.bucketId && other.windowDurationMins===v.windowDurationMins && other.resetsAt===v.resetsAt && other.usedPercent===v.usedPercent
+    )===index).slice(0,20),
     resetCredits: normalizeResetCredits(input.rateLimitResetCredits),
     fetchedAt
   };

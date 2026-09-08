@@ -678,3 +678,11 @@ export async function projectDiff(
     gitFailure(error);
   }
 }
+
+/** Validate file/folder references without reading their content or following symlinks. */
+export async function projectReference(root: string, relative: string): Promise<string> {
+  const resolved = await resolveExistingPath(root, relative, true);
+  if (!resolved.stat.isFile() && !resolved.stat.isDirectory())
+    throw new ConsoleError(403, "PATH_FORBIDDEN", "只能引用普通文件或文件夹。");
+  return resolved.relative;
+}

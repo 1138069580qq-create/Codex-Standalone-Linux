@@ -11,6 +11,13 @@
     const hex = Array.from(bytes, n => n.toString(16).padStart(2, '0')).join('');
     return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
   }
+  function windowLabel(minutes) {
+    if (minutes === 10080) return '一周';
+    if (!Number.isFinite(minutes) || minutes <= 0) return '额度窗口';
+    if (minutes % 1440 === 0) return `${minutes / 1440} 天窗口`;
+    if (minutes % 60 === 0) return `${minutes / 60} 小时`;
+    return `${minutes} 分钟`;
+  }
   function applyEvent(state, event) {
     const p = event.payload || {};
     if (event.type === 'item') state.items.set(p.id, { ...p });
@@ -25,7 +32,7 @@
       item.text = (item.text + p.text).slice(0, 65536);
     } else if (event.type === 'approval') state.pending.set(p.id, p);
     else if (event.type === 'approvalResolved') state.pending.delete(p.id);
-    else if (event.type === 'status') state.status = p.status || state.status;
+    else if (event.type === 'status') { state.status = p.status || state.status; if(p.tokenUsage)state.tokenUsage=p.tokenUsage; }
     let size = [...state.items.values()].reduce((sum, v) => sum + v.text.length, 0);
     while (state.items.size > 200 || size > 512 * 1024) {
       const key = state.items.keys().next().value;
@@ -42,7 +49,7 @@
     }
     return { events, carry: tail };
   }
-  const api = { applyEvent, parseSse, requestId };
+  const api = { applyEvent, parseSse, requestId, windowLabel };
   if (typeof module !== 'undefined') module.exports = api;
   else scope.CodexState = api;
 })(globalThis);

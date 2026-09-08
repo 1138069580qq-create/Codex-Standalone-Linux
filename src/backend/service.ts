@@ -18,11 +18,14 @@ import {
   TimelineItem
 } from "./normalize";
 import { CommandReceipts } from "./receipts";
-import { attachmentPath } from "./files";
+import { attachmentPath, projectReference } from "./files";
 import { discoverExistingCodex, type DiscoveredCodexEndpoint } from "./discovery";
 import { normalizeRateLimits, type CodexRateLimits } from "./limits";
 
+import { readCatalog, publicCatalog, resolveExtensions, accessPolicy, readMcp, type Catalog } from "./extensions";
+
 interface Session {
+  tokenUsage?: { total: number; last: number; contextWindow?: number };
   id: string;
   projectId: string;
   title: string;
@@ -46,6 +49,7 @@ interface Pending {
 }
 export class CodexConsoleService {
   readonly hub = new ReplayHub();
+  private catalogs = new Map<string, { at: number; value: Promise<Catalog> }>();
   private peer?: CodexRpcClient;
   private connecting?: Promise<void>;
   private sessions = new Map<string, Session>();
@@ -170,6 +174,7 @@ export class CodexConsoleService {
     this.sessions.clear();
     this.opening.clear();
     this.modelsCache = undefined;
+    this.catalogs.clear();
     this.reason = "Codex is disconnected.";
     this.hub.publish({ type: "connection", payload: { connected: false } });
     this.hub.reset("connection-changed");
@@ -240,6 +245,34 @@ export class CodexConsoleService {
     });
   }
 
+  private async catalogFor(root: string, refresh = false): Promise<Catalog> {
+    const cached=this.catalogs.get(root);
+    if (!refresh && cached && Date.now()-cached.at<60_000) return cached.value;
+    const value=readCatalog((method,params)=>this.rpc().request(method,params),root,refresh);
+    this.catalogs.set(root,{at:Date.now(),value});
+    return value;
+  }
+  async extensions(identity: Identity, projectId: string, refresh = false) {
+    const project=this.project(identity,projectId);
+    return publicCatalog(await this.catalogFor(project.root,refresh));
+  }
+  async mcp(identity: Identity, projectId: string, threadId?: string) {
+    const project=this.project(identity,projectId);
+    if(threadId) await this.verifyThread(project,threadId);
+    try { return await readMcp((method,params)=>this.rpc().request(method,params),threadId); }
+    catch { throw new ConsoleError(502,"MCP_UNAVAILABLE","此 Codex 未提供 MCP 状态。"); }
+  }
+  async goal(identity: Identity, projectId: string, id: string, objective?: string) {
+    const project=this.project(identity,projectId,objective===undefined?"view":"send");
+    await this.verifyThread(project,id);
+    if(objective!==undefined && (typeof objective!=="string" || !objective.trim() || objective.length>4000))
+      throw new ConsoleError(400,"INVALID_GOAL","目标不能为空，最多 4000 字符。");
+    try {
+      const result=await this.rpc().request<any>(objective===undefined?"thread/goal/get":"thread/goal/set",{threadId:id,...(objective===undefined?{}:{objective:objective.trim()})});
+      const g=result.goal;
+      return {goal:g?{objective:String(g.objective||"").slice(0,4000),status:String(g.status||""),tokensUsed:g.tokensUsed,timeUsedSeconds:g.timeUsedSeconds}:null};
+    } catch { throw new ConsoleError(502,"GOAL_UNAVAILABLE","此 Codex 未能读取或保存目标。"); }
+  }
   async models(identity: Identity) {
     if (
       !this.config.value.projects.some((p) => permissions(p, identity).view) &&
@@ -391,6 +424,7 @@ export class CodexConsoleService {
       status: session.status,
       turnId: session.turnId,
       items: [...session.items.values()],
+      tokenUsage: session.tokenUsage,
       pending: [...this.pending.values()]
         .filter((p) => p.threadId === id)
         .map((p) => this.publicPending(p)),
@@ -475,7 +509,21 @@ export class CodexConsoleService {
         "EFFORT_UNAVAILABLE",
         "This reasoning level is not supported by the selected model."
       );
+    const policy=accessPolicy(identity,project.root,input.access,input.confirmFullAccess);
     const content: any[] = [{ type: "text", text: input.text }];
+    if (input.extensions !== undefined) {
+      // Refresh before a send so revoked or disabled skills cannot be selected from a stale browser cache.
+      if (!Array.isArray(input.extensions) || input.extensions.length > 12)
+        throw new ConsoleError(400,"INVALID_EXTENSIONS","最多选择 12 个技能或插件。");
+      if (input.extensions.length) content.push(...resolveExtensions(await this.catalogFor(project.root,true),input.extensions));
+    }
+    if (input.references !== undefined) {
+      this.project(identity,projectId,"files");
+      if (!Array.isArray(input.references) || input.references.length > 12 || input.references.some((v: unknown)=>typeof v!=="string"))
+        throw new ConsoleError(400,"INVALID_REFERENCES","最多引用 12 个文件或文件夹。");
+      for(const rel of [...new Set<string>(input.references)])
+        content[0].text += `\n\nProject reference: ${await projectReference(project.root,rel)}`;
+    }
     if (
       input.attachments !== undefined &&
       (!Array.isArray(input.attachments) || input.attachments.length > 5)
@@ -541,16 +589,9 @@ export class CodexConsoleService {
           input: content,
           cwd: project.root,
           runtimeWorkspaceRoots: [project.root],
-          approvalPolicy: "on-request",
+          ...policy,
           approvalsReviewer: "user",
           model: model.model,
-          sandboxPolicy: {
-            type: "workspaceWrite",
-            writableRoots: [project.root],
-            networkAccess: false,
-            excludeTmpdirEnvVar: true,
-            excludeSlashTmp: true
-          },
           collaborationMode: {
             mode: input.mode === "plan" ? "plan" : "default",
             settings: {
@@ -722,10 +763,17 @@ export class CodexConsoleService {
       this.hub.publish({ type: "limits", payload: { stale: true } });
       return;
     }
+    if (method === "skills/changed") { this.catalogs.clear(); return; }
     const id = p.threadId || p.thread?.id;
     const session = this.sessions.get(id);
     if (!session) return;
     session.touched = Date.now();
+    if (method === "thread/tokenUsage/updated") {
+      const n=(v:any)=>Number.isFinite(v)&&v>=0?Math.floor(v):0;
+      session.tokenUsage={total:n(p.tokenUsage?.total?.totalTokens),last:n(p.tokenUsage?.last?.totalTokens),contextWindow:n(p.tokenUsage?.modelContextWindow)||undefined};
+      this.hub.publish({type:"status",projectId:session.projectId,threadId:id,payload:{status:session.status,tokenUsage:session.tokenUsage}});
+      return;
+    }
     if (method === "error") {
       const item: TimelineItem = {
         id: `error-${randomUUID()}`,

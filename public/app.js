@@ -3,7 +3,9 @@ const $ = id => document.getElementById(id);
 const S = { user:null, csrf:'', projects:[], models:[], project:null, thread:null, threads:[], next:null,
   items:new Map(), pending:new Map(), status:'idle', cursor:'', stream:null, epoch:0, retry:0,
   timer:null, hiddenTimer:null, renderTimer:null, nodes:new Map(), attachments:[], bytes:0, truncated:false,
-  connected:false, panel:'quota', filePath:'.', syncing:null, sending:false, attempt:null, creationId:null };
+  connected:false, attachedThreadId:null, capabilities:{}, panel:'quota', filePath:'.', syncing:null, sending:false, attempt:null, creationId:null,
+  selected:[], references:[], goalDraft:'', accessConfirmed:false, tokenUsage:null, threadSettings:null, settingsOverrides:{}, modelRequest:null, modelsUnavailable:false,
+  catalog:null, catalogProject:null, catalogRequest:null, menuMode:'plus', menuOpen:false, menuItems:[], menuIndex:0, referencePath:'.' };
 const bytes = n => n < 1024 ? `${n} B` : n < 1048576 ? `${(n/1024).toFixed(1)} KiB` : `${(n/1048576).toFixed(1)} MiB`;
 const date = v => v ? new Date(v < 1e12 ? v*1000 : v).toLocaleString('zh-CN', { hour12:false }) : '未知';
 const stateName = v => ({idle:'待命',running:'运行中',inProgress:'运行中',completed:'已完成',interrupted:'已停止',failed:'失败',notLoaded:'未加载',active:'运行中',systemError:'错误'})[v] || v;
@@ -21,7 +23,8 @@ async function api(url, body, method=body===undefined?'GET':'POST') {
     const data=await response.json().catch(()=>({}));
     if(!response.ok) {
       if(response.status===401 && S.user) loggedOut();
-      const error=new Error(data.data?.message || `请求失败 (${response.status})`); error.status=response.status; throw error;
+      const message=data.data?.code==='BACKEND_ERROR'?'Codex 请求失败，请检查连接或登录状态。':data.data?.message;
+      const error=new Error(message || `请求失败 (${response.status})`); error.status=response.status; throw error;
     }
     return data;
   } catch(error) {
@@ -33,32 +36,66 @@ const q = params => new URLSearchParams(params).toString();
 const apiProject = (route, extra={}) => `/api/codex/${route}?${q({projectId:S.project?.id||'',...extra})}`;
 function permission(name) { return !!S.project?.permissions?.[name]; }
 function closeStream() { clearTimeout(S.timer); S.timer=null; S.stream?.close(); S.stream=null; }
-function clearConversation() { S.epoch++; closeStream(); clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='准备好，开始你的下一步。'; $('prompt').value=''; renderAttachments(); controls(); }
-function loggedOut() { clearConversation(); S.user=null; S.csrf=''; S.connected=false; S.projects=[]; S.threads=[]; S.project=null; S.models=[]; S.items.clear(); $('workspace').hidden=true; $('login-view').hidden=false; $('settings-dialog').close(); $('new-thread-dialog').close(); $('password').value=''; }
+function clearConversation() { S.epoch++; closeStream(); clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='新任务'; S.selected=[]; S.references=[]; S.goalDraft=''; S.accessConfirmed=false; S.tokenUsage=null; S.threadSettings=null; S.settingsOverrides={}; $('access').value='default'; closeMenu(); $('prompt').value=''; renderAttachments(); controls(); }
+function loggedOut() { clearConversation(); S.user=null; S.csrf=''; S.connected=false; S.attachedThreadId=null; S.capabilities={}; S.projects=[]; S.threads=[]; S.project=null; S.models=[]; S.items.clear(); $('workspace').hidden=true; $('login-view').hidden=false; $('settings-dialog').close(); $('new-thread-dialog').close(); for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close(); $('password').value=''; S.catalog=null; }
+function supports(capability) {
+  if(capability==='createThread' && S.attachedThreadId)return false;
+  return S.capabilities?.[capability]!==false;
+}
+function commandAvailable(command) {
+  const capability={new:'createThread',skills:'extensions',plugins:'extensions',mcp:'mcp',goal:'setGoal'}[command.id];
+  return (!capability || supports(capability)) && (!command.files || permission('files'));
+}
 function controls() {
   const ready=!!S.project && S.connected && permission('send');
   $('send').disabled=!ready || S.status==='running' || S.sending;
   $('prompt').disabled=!ready || S.sending;
   $('stop').hidden=S.status!=='running'; $('stop').disabled=!ready || !S.thread;
-  $('attach').disabled=!ready || !permission('files') || S.sending;
-  $('new-thread').disabled=!S.connected || !permission('send') || S.sending;
+  $('attach').disabled=!ready || S.sending;
+  $('access').disabled=!ready || S.sending;
+  for(const id of ['model','effort','mode'])$(id).disabled=!ready || S.sending || (id!=='mode'&&S.modelsUnavailable);
+  $('access').querySelector('option[value=full]').disabled=!S.user?.admin;
+  $('sidebar-plugins').disabled=!S.connected || !S.project || !supports('extensions');
+  $('sidebar-plugins').title=supports('extensions')?'':'此连接暂不支持，请在 Codex 桌面使用。';
+  $('new-thread').hidden=!supports('createThread');
+  $('new-thread').disabled=!S.connected || !permission('send') || S.sending || !supports('createThread');
+  $('refresh-quota').hidden=!supports('quota');
+  $('refresh-quota').disabled=!S.connected || !supports('quota');
   $('project-select').disabled=S.sending; $('settings').disabled=S.sending;
   $('refresh-threads').disabled=!S.connected || !S.project;
   $('task-status').textContent=stateName(S.status); $('task-status').className=`badge${S.status==='running'?' running':''}`;
-  $('connection').textContent=S.connected?'Codex 已连接':'未连接'; $('connection').className=`badge${S.connected?' online':''}`;
-  $('connect').hidden=!S.user?.admin || S.connected; $('settings').hidden=!S.user?.admin;
+  $('connection').textContent=S.connected?(S.attachedThreadId?'桌面任务已连接':'Codex 已连接'):'未连接'; $('connection').className=`badge${S.connected?' online':''}`;
+  $('connect').hidden=!S.user?.admin || S.connected; $('settings').hidden=!S.user?.admin || !supports('configureTransport');
   $('refresh-files').disabled=!permission('files'); $('refresh-diff').disabled=!permission('files');
+}
+async function restoreAttachedThread(refresh=false) {
+  if(!S.attachedThreadId)return false;
+  if(S.thread?.id===S.attachedThreadId){if(refresh)await syncSnapshot();return true;}
+  const thread=S.threads.find(t=>t.id===S.attachedThreadId);
+  if(!thread)throw new Error('当前桌面任务未加载，请刷新任务列表。');
+  // Rebind without clearing the draft, attachments, permissions or idempotency key.
+  const epoch=S.epoch;
+  S.thread=thread; S.status=thread.status; $('thread-title').textContent=thread.title;
+  $('empty').hidden=true; renderThreads(); await syncSnapshot();
+  return epoch===S.epoch && S.thread?.id===S.attachedThreadId;
+}
+async function startNewConversation() {
+  if(S.sending)return;
+  if(S.attachedThreadId){await restoreAttachedThread(true);notice('已连接桌面当前任务。');}
+  else {if(!supports('createThread'))throw new Error('此连接不支持新建任务。');clearConversation();renderThreads();}
+  $('prompt').focus();
 }
 async function signedIn(data) { S.user=data.user; S.csrf=data.csrf; $('login-view').hidden=true; $('workspace').hidden=false; $('password').value=''; $('user-name').textContent=S.user.username; await refreshContext(); }
 async function refreshContext() {
   const [status, projects]=await Promise.all([api('/api/codex/status'),api('/api/codex/projects')]);
-  S.connected=status.connected; S.projects=projects; $('project-count').textContent=String(projects.length);
+  S.connected=status.connected; S.attachedThreadId=status.attachedThreadId||null; S.capabilities=status.capabilities||{}; S.projects=projects; $('project-count').textContent=String(projects.length);
   $('project-select').replaceChildren();
   if(!projects.length) $('project-select').append(el('option','尚未分配项目'));
   for(const project of projects) { const option=el('option',project.name); option.value=project.id; $('project-select').append(option); }
   const selected=projects.find(p=>p.id===S.project?.id)||projects[0];
   if(!selected || selected.id!==S.project?.id) await chooseProject(selected?.id); else { S.project=selected; $('project-select').value=selected.id; if(S.connected) await loadThreads(); }
-  notice(!S.connected ? 'Codex 尚未连接。管理员可在设置中扫描已有接口并保存配置，再点击「连接 Codex」。应用不会自动启动 Codex。' : !projects.length ? '暂无授权项目。请让管理员添加项目并为你的账号授权。' : '');
+  if(S.attachedThreadId)await restoreAttachedThread();
+  notice(!S.connected ? '未连接 Codex。请在设置中选择接口。' : !projects.length ? '尚无项目权限。' : '');
   controls();
   if(S.connected && (S.user.admin || projects.length)) {
     const results=await Promise.allSettled([loadModels(),loadQuota()]);
@@ -66,10 +103,10 @@ async function refreshContext() {
   }
 }
 async function chooseProject(id) {
-  clearConversation(); S.project=S.projects.find(p=>p.id===id)||null; S.threads=[]; S.next=null; S.filePath='.';
+  clearConversation(); S.project=S.projects.find(p=>p.id===id)||null; S.threads=[]; S.next=null; S.filePath='.'; S.catalog=null; S.catalogProject=null; S.catalogRequest=null;
   if(S.project) $('project-select').value=S.project.id;
-  $('project-root').textContent=S.project?.root||'项目目录不会自动创建'; $('breadcrumb').textContent=`WORKSPACE / ${S.project?.name||'OVERVIEW'}`;
-  $('thread-filter').value=''; $('file-list').replaceChildren(); $('diff-content').textContent='点击刷新读取 Git Diff。'; renderThreads(); controls();
+  $('project-root').textContent=S.project?.root||''; $('breadcrumb').textContent=S.project?.name||'';
+  $('thread-filter').value=''; $('file-list').replaceChildren(); $('diff-content').textContent='点击刷新'; renderThreads(); controls();
   if(S.connected && S.project) await loadThreads();
 }
 async function loadThreads(more=false) {
@@ -84,14 +121,15 @@ function renderThreads() {
   const filter=$('thread-filter').value.toLowerCase(); $('thread-list').replaceChildren();
   for(const thread of S.threads.filter(t=>t.title.toLowerCase().includes(filter))) {
     const button=el('button',undefined,`task-link${S.thread?.id===thread.id?' active':''}`);
-    button.append(el('strong',thread.title),el('span',`${stateName(thread.status)} · ${date(thread.updatedAt)}`));
+    button.append(el('strong',thread.title),el('span',`${stateName(thread.status)}${thread.updatedAt?' · '+date(thread.updatedAt):''}`));
     button.onclick=action(()=>selectThread(thread)); $('thread-list').append(button);
   }
-  if(!S.threads.length) $('thread-list').append(el('p',S.connected?'这个项目还没有任务。':'连接后显示任务。','footnote'));
+  if(!S.threads.length) $('thread-list').append(el('p',S.connected?'暂无任务':'未连接','footnote'));
   $('more-threads').hidden=!S.next;
 }
 async function selectThread(thread) {
   if(S.sending) throw new Error('消息正在提交，请稍后切换。');
+  if(S.attachedThreadId){if(thread.id!==S.attachedThreadId)throw new Error('此连接仅支持桌面当前任务。');await restoreAttachedThread(true);return;}
   clearConversation(); S.thread=thread; $('thread-title').textContent=thread.title; $('sidebar').classList.remove('mobile-open'); renderThreads(); await syncSnapshot();
 }
 async function syncSnapshot() {
@@ -99,13 +137,13 @@ async function syncSnapshot() {
   if(S.syncing) return S.syncing;
   closeStream(); const epoch=S.epoch, id=S.thread.id;
   const pending=(async()=>{
-    $('stream-state').textContent='读取任务快照…';
+    $('stream-state').textContent='读取中…';
     const result=await api(apiProject(`threads/${encodeURIComponent(id)}`));
     if(epoch!==S.epoch) return;
     S.items=new Map(result.items.map(v=>[v.id,v])); S.pending=new Map(result.pending.map(v=>[v.id,v]));
-    S.cursor=result.cursor; S.status=result.status; S.truncated=result.truncated; S.nodes.clear(); $('timeline').replaceChildren($('empty')); $('empty').hidden=true;
+    S.cursor=result.cursor; S.tokenUsage=result.tokenUsage||null; if(result.settings)applyThreadSettings(result.settings); S.status=result.status; S.truncated=result.truncated; S.nodes.clear(); $('timeline').replaceChildren($('empty')); $('empty').hidden=true;
     renderTimeline(); renderApprovals(); controls(); openStream();
-    if(result.truncated) notice('仅显示最近的部分记录；较旧内容仍保存在 Codex。');
+    if(result.truncated) notice('仅显示最近记录。');
   })();
   S.syncing=pending;
   try { await pending; } finally { if(S.syncing===pending) S.syncing=null; }
@@ -114,25 +152,25 @@ function openStream() {
   closeStream(); if(!S.thread || !S.project || document.hidden) return;
   const epoch=S.epoch;
   const stream=new EventSource(apiProject('events',{threadId:S.thread.id,cursor:S.cursor})); S.stream=stream;
-  stream.onopen=()=>{ if(epoch!==S.epoch)return; S.retry=0; $('stream-state').textContent='增量文本流 · 已连接'; };
+  stream.onopen=()=>{ if(epoch!==S.epoch)return; S.retry=0; $('stream-state').textContent='已连接'; };
   stream.addEventListener('codex',event=>{
     if(epoch!==S.epoch || S.stream!==stream) return;
     try {
       const data=JSON.parse(event.data); S.bytes+=new TextEncoder().encode(event.data).length;
-      $('network-stats').textContent=`本页 SSE ${bytes(S.bytes)}`;
+      $('stream-state').title=`本页接收 ${bytes(S.bytes)}`;
       if(data.type==='reset') { syncSnapshot().catch(e=>toast(e.message,true)); return; }
-      if(data.type==='connection') { S.connected=!!data.payload.connected; controls(); if(!S.connected) { closeStream(); notice('Codex 连接已断开。请由管理员手动重连；未确认的命令不会自动重发。'); } }
+      if(data.type==='connection') { S.connected=!!data.payload.connected; controls(); if(!S.connected) { closeStream(); notice('Codex 已断开，请重新连接。'); } }
       if(data.type==='limits') { if(S.panel==='quota'&&!document.hidden) loadQuota().catch(()=>{}); }
       if(!CodexState.applyEvent(S,data)) { syncSnapshot().catch(e=>toast(e.message,true)); return; }
       S.cursor=data.cursor;
       if(data.type==='approval'||data.type==='approvalResolved') renderApprovals();
-      if(data.type==='status') { controls(); const row=S.threads.find(t=>t.id===S.thread?.id); if(row){row.status=S.status;renderThreads();} }
+      if(data.type==='status') { if(data.payload.settings)applyThreadSettings(data.payload.settings); if(data.payload.modelsChanged)loadModels().catch(e=>notice(e.message)); controls(); const row=S.threads.find(t=>t.id===S.thread?.id); if(row){row.status=S.status;renderThreads();} }
       if(data.type==='item'||data.type==='delta') scheduleRender();
     } catch { syncSnapshot().catch(e=>toast(e.message,true)); }
   });
   stream.onerror=()=>{
     if(epoch!==S.epoch||S.stream!==stream)return;
-    closeStream(); $('stream-state').textContent='连接中断 · 等待重连';
+    closeStream(); $('stream-state').textContent='重连中…';
     scheduleReconnect(epoch);
   };
 }
@@ -180,45 +218,139 @@ function renderApprovals(){
   }
 }
 async function answerApproval(id,answer){ const thread=S.thread?.id, epoch=S.epoch; if(!thread)return; await api(`/api/codex/threads/${encodeURIComponent(thread)}/approvals/${encodeURIComponent(id)}`,{projectId:S.project.id,...answer});if(epoch===S.epoch){S.pending.delete(id);renderApprovals();} }
-async function loadModels(){ const {data}=await api('/api/codex/models');S.models=data;$('model').replaceChildren();for(const model of data){const option=el('option',model.displayName||model.model||model.id);option.value=model.model||model.id;option.selected=!!model.isDefault;$('model').append(option);}loadEfforts(); }
-function loadEfforts(){ const model=S.models.find(m=>(m.model||m.id)===$('model').value);$('effort').replaceChildren(el('option','默认强度'));$('effort').firstChild.value='';for(const e of model?.supportedReasoningEfforts||[]){const option=el('option',e.reasoningEffort);option.value=e.reasoningEffort;option.selected=e.reasoningEffort===model.defaultReasoningEffort;$('effort').append(option);} }
+async function loadModels(){
+  if(S.modelRequest)return S.modelRequest;
+  const epoch=S.epoch;
+  const pending=(async()=>{try{
+    const result=await api('/api/codex/models');if(epoch!==S.epoch)return;
+    const selection=$('model').value,effort=$('effort').value;
+    S.models=result.data;S.modelsUnavailable=false;$('model').replaceChildren();
+    for(const model of S.models){const option=el('option',model.displayName||model.model||model.id);option.value=model.model||model.id;option.selected=!!model.isDefault;$('model').append(option);}
+    if(S.attachedThreadId&&S.settingsOverrides?.model&&selection&&!S.models.some(m=>(m.model||m.id)===selection)){const stale=el('option',selection+' · 已不在目录');stale.value=selection;stale.disabled=true;$('model').append(stale);}
+    if(S.models.some(m=>(m.model||m.id)===selection)||S.attachedThreadId&&S.settingsOverrides?.model&&selection){$('model').value=selection;loadEfforts(effort);}else loadEfforts();
+    if(S.attachedThreadId){if(result.settings)S.threadSettings=result.settings;renderThreadSettings();}
+    $('model').title=result.source||'';controls();
+  }catch(error){if(epoch===S.epoch){S.modelsUnavailable=true;S.models=[];$('model').replaceChildren();renderThreadSettings();controls();}throw error;}})();
+  S.modelRequest=pending;try{return await pending;}finally{if(S.modelRequest===pending)S.modelRequest=null;}
+}
+function loadEfforts(preferred){
+  const model=S.models.find(m=>(m.model||m.id)===$('model').value);
+  $('effort').replaceChildren(el('option','默认强度'));$('effort').firstChild.value='';
+  for(const e of model?.supportedReasoningEfforts||[]){const option=el('option',e.reasoningEffort);option.value=e.reasoningEffort;option.selected=e.reasoningEffort===(preferred===undefined?model.defaultReasoningEffort:preferred);$('effort').append(option);}
+}
+function applyThreadSettings(settings){S.threadSettings=settings;renderThreadSettings();}
+function markSettings(...keys){if(S.attachedThreadId){S.settingsOverrides||={};for(const key of keys)S.settingsOverrides[key]=true;renderSettingsSource();}}
+function renderSettingsSource(){
+  $('settings-source').hidden=!S.attachedThreadId;
+  const modified=Object.keys(S.settingsOverrides||{}).length>0;
+  $('settings-source').textContent=modified?'下次发送应用更改':'跟随桌面';
+  $('settings-source').title=S.threadSettings?.provider||'';
+  $('follow-desktop').hidden=!S.attachedThreadId||!modified;
+}
+function renderThreadSettings(){
+  const settings=S.threadSettings;if(!S.attachedThreadId||!settings){renderSettingsSource();return;}
+  const changed=S.settingsOverrides||{},effort=changed.effort?$('effort').value:settings.effort||'';
+  if(!changed.model&&settings.model){
+    if(!Array.from($('model').options).some(o=>o.value===settings.model)){const option=el('option',settings.model+' · 当前任务');option.value=settings.model;$('model').append(option);}
+    $('model').value=settings.model;
+  }
+  loadEfforts(effort);
+  if(effort&&!Array.from($('effort').options).some(o=>o.value===effort)){const option=el('option',effort);option.value=effort;$('effort').append(option);}
+  $('effort').value=effort;
+  if(!changed.mode)$('mode').value=settings.mode;
+  if(!changed.access){
+    if(settings.access==='custom'&&!$('access').querySelector('option[value=custom]')){const option=el('option','桌面自定义权限');option.value='custom';option.disabled=true;$('access').append(option);}
+    $('access').value=settings.access;S.accessConfirmed=false;
+  }
+  $('access').title=[settings.sandboxType,settings.approvalPolicy].filter(Boolean).join(' · ');
+  renderSettingsSource();
+}
 async function sendMessage(){
   if(S.sending || !S.project || !S.connected || !permission('send') || !$('prompt').value.trim())return;
   const epoch=S.epoch; let accepted=false;
   S.sending=true;
   try {
     controls();
-    const content={text:$('prompt').value,projectId:S.project.id,model:$('model').value,effort:$('effort').value,mode:$('mode').value,attachments:[...S.attachments]};
-    // Create lazily: an empty project's composer is a real composer, not a disabled demo.
+    const content={text:$('prompt').value,projectId:S.project.id,model:$('model').value,effort:$('effort').value,mode:$('mode').value,attachments:[...S.attachments],extensions:S.selected.map(e=>e.id),references:[...S.references],access:$('access').value,confirmFullAccess:S.accessConfirmed,...(S.attachedThreadId?{settingsOverrides:Object.keys(S.settingsOverrides||{})}:{})};
+    if(S.attachedThreadId && !await restoreAttachedThread())return;
+    if(S.status==='running')throw new Error('任务仍在运行，请等待本轮结束。');
+    // Only regular app-server mode may create a task on first send.
     if(!S.thread){
+      if(!supports('createThread'))throw new Error('此连接不支持新建任务，请先选择已有任务。');
       S.creationId ||= CodexState.requestId();
       const thread=await api('/api/codex/threads',{projectId:content.projectId,title:content.text.trim().slice(0,60),requestId:S.creationId});
       if(epoch!==S.epoch)return;
       S.thread=thread; S.threads.unshift(thread); S.status=thread.status;
       $('thread-title').textContent=thread.title; $('empty').hidden=true; renderThreads();
     }
+    if(S.goalDraft){await api(`/api/codex/threads/${encodeURIComponent(S.thread.id)}/goal`,{projectId:S.project.id,objective:S.goalDraft},'PUT');S.goalDraft='';}
     const fingerprint=JSON.stringify({thread:S.thread.id,...content});
     if(S.attempt?.fingerprint!==fingerprint)S.attempt={fingerprint,requestId:CodexState.requestId()};
     await api(`/api/codex/threads/${encodeURIComponent(S.thread.id)}/messages`,{...content,requestId:S.attempt.requestId});
     accepted=true;
-    if(epoch===S.epoch){$('prompt').value='';S.attachments=[];S.attempt=null;renderAttachments();notice();await syncSnapshot();}
+    if(epoch===S.epoch){$('prompt').value='';S.attachments=[];S.selected=[];S.references=[];S.attempt=null;S.settingsOverrides={};renderSettingsSource();renderAttachments();notice();await syncSnapshot();}
   }catch(error){
     if(epoch===S.epoch)notice(accepted?'消息已发送，输出读取失败。点击任务可重新连接。':'发送失败：'+error.message);
     throw error;
   }finally{S.sending=false;controls();}
 }
-function renderAttachments(){ $('attachments').replaceChildren();for(const file of S.attachments){const button=el('button',`${file.split('/').pop()} ×`);button.type='button';button.onclick=()=>{S.attachments=S.attachments.filter(v=>v!==file);renderAttachments();};$('attachments').append(button);} }
-async function uploadFile(){const file=$('upload').files[0];if(!file)return;const epoch=S.epoch, projectId=S.project?.id;try{if(S.attachments.length>=5)throw new Error('最多 5 个附件。');if(file.size>4*1024*1024)throw new Error('上传文件不能超过 4 MiB。');const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=reject;reader.readAsDataURL(file);});if(epoch!==S.epoch || !projectId)throw new Error('项目已切换，已取消上传。');const result=await api('/api/codex/files',{projectId,name:file.name,base64:data});if(epoch===S.epoch){S.attachments.push(result.path);renderAttachments();toast('已上传到项目内的独立附件目录。');}}finally{$('upload').value='';} }
+function renderAttachments(){
+  const container=$('attachments'); container.replaceChildren();
+  const chip=(label,remove)=>{const button=el('button',label+' ×','context-chip');button.type='button';button.onclick=()=>{if(S.sending)return;remove();renderAttachments();};container.append(button);};
+  for(const file of S.attachments)chip(file.split('/').pop(),()=>S.attachments=S.attachments.filter(v=>v!==file));
+  for(const entry of S.selected)chip((entry.kind==='plugin'?'◇ ':'$ ')+entry.label,()=>S.selected=S.selected.filter(v=>v.id!==entry.id));
+  for(const ref of S.references)chip('▸ '+ref,()=>S.references=S.references.filter(v=>v!==ref));
+  if(S.goalDraft)chip('目标：'+S.goalDraft.slice(0,40),()=>S.goalDraft='');
+}
+async function uploadFile(){
+  const files=Array.from($('upload').files); if(!files.length)return;
+  const epoch=S.epoch,projectId=S.project?.id;
+  try{
+    if(S.attachments.length+files.length>5)throw new Error('最多 5 个附件。');
+    for(const file of files){
+      if(file.size>4*1024*1024)throw new Error(`${file.name} 超过 4 MiB。`);
+      const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(new Error('无法读取文件'));reader.readAsDataURL(file);});
+      if(epoch!==S.epoch || !projectId)throw new Error('项目已切换，已取消上传。');
+      const result=await api('/api/codex/files',{projectId,name:file.name,base64:data});
+      if(epoch!==S.epoch)return;
+      S.attachments.push(result.path);renderAttachments();
+    }
+  }finally{$('upload').value='';}
+}
 let quotaLoading=null;
-async function loadQuota(){if(!S.connected)return;if(quotaLoading)return quotaLoading;quotaLoading=(async()=>{try{const limits=await api('/api/codex/account/limits');renderQuota(limits);}catch(error){$('quota-content').textContent=`额度不可用：${error.message}`;throw error;}})();try{await quotaLoading;}finally{quotaLoading=null;} }
+async function loadQuota(){if(!supports('quota')){$('quota-content').textContent='请在 Codex 桌面查看额度和重置卡。';return;}if(!S.connected)return;if(quotaLoading)return quotaLoading;quotaLoading=(async()=>{try{const limits=await api('/api/codex/account/limits');renderQuota(limits);}catch(error){$('quota-content').textContent='暂时无法读取额度';throw error;}})();try{await quotaLoading;}finally{quotaLoading=null;} }
 function renderQuota(limits){
   const container=$('quota-content');container.replaceChildren();
-  if(!limits.windows.length)container.append(el('p','Codex 未提供额度窗口（部分 API-key / 自定义供应商账号不支持）。','footnote'));
-  for(const window of limits.windows){const box=el('div',undefined,'quota-window'),head=el('div',undefined,'panel-title');const minutes=window.windowDurationMins;const label=minutes===10080?'周限额':minutes===300?'5 小时限额':minutes?`${minutes} 分钟窗口`:(window.name||window.id);head.append(el('span',label),el('strong',`${Math.round(window.usedPercent)}%`));const bar=el('progress');bar.max=100;bar.value=window.usedPercent;bar.setAttribute('aria-label',`${label} 已用 ${window.usedPercent}%`);box.append(head,bar,el('p',`已用 · 重置 ${date(window.resetsAt)}`,'footnote'));if(window.planType)box.append(el('p',window.planType,'footnote'));container.append(box);}
+  const windows=limits.windows.filter(w=>!w.bucketId||w.bucketId==='codex');
+  const visible=windows.length?windows:limits.windows;
+  if(!visible.length)container.append(el('p','未提供额度数据','footnote'));
+  for(const window of visible){
+    const box=el('div',undefined,'quota-window'),head=el('div',undefined,'panel-title');
+    const label=CodexState.windowLabel(window.windowDurationMins),remaining=Math.max(0,100-window.usedPercent);
+    head.append(el('span',label),el('strong',`${Math.round(remaining)}%`));
+    const bar=el('progress');bar.max=100;bar.value=remaining;bar.setAttribute('aria-label',`${label} 剩余 ${remaining}%`);
+    box.append(head,bar,el('p',`剩余${window.resetsAt?' · '+shortDate(window.resetsAt)+' 重置':''}`,'footnote'));container.append(box);
+  }
   const credits=limits.resetCredits;
-  if(credits){container.append(el('p',`可用重置卡：${credits.availableCount}`,'footnote'));for(const credit of credits.details){const card=el('div',undefined,'credit');card.append(el('strong',credit.title||'重置卡'));if(credit.description)card.append(el('p',credit.description));card.append(el('p',`到期 ${date(credit.expiresAt)}`,'footnote'));if(S.user?.admin&&credits.availableCount>0){const button=el('button','使用此卡','small');button.onclick=action(async()=>{if(!confirm('此操作会消耗共享 Codex 账号的重置卡，影响所有用户。确认使用？'))return;const result=await api('/api/codex/account/limits/reset',{requestId:CodexState.requestId(),creditId:credit.id});renderQuota(result.rateLimits);toast('已请求使用，并重新读取实际额度。');});card.append(button);}container.append(card);}}
-  container.append(el('p',`读取于 ${date(limits.fetchedAt)}`,'footnote'));
+  if(!credits){container.append(el('p','未提供重置卡数据','footnote'));return;}
+  const rows=(credits.availableCount>0?credits.details:[]).filter(c=>(!c.status||c.status==='available')&&(c.expiresAt==null||c.expiresAt*1000>Date.now()));
+  const cards=rows.length?rows:(credits.availableCount>0?[{id:undefined,expiresAt:undefined}]:[]);
+  container.append(el('h3',`重置卡 · ${credits.availableCount}`,'quota-card-heading'));
+  for(const credit of cards){
+    const card=el('div',undefined,'credit');
+    card.append(el('p',credit.expiresAt===null?'不过期':credit.expiresAt?shortDate(credit.expiresAt)+' 到期':'未提供到期日'));
+    const button=el('button','使用重置卡','small');button.disabled=!S.user?.admin;
+    let requestId=null;
+    button.onclick=action(async()=>{
+      if(!await confirmAction('使用重置卡','确认消耗一张重置卡？此操作不可撤销。'))return;
+      requestId ||= CodexState.requestId();
+      const result=await api('/api/codex/account/limits/reset',{requestId,...(credit.id?{creditId:credit.id}:{})});
+      renderQuota(result.rateLimits);toast('已更新额度');
+    });
+    card.append(button);container.append(card);
+  }
 }
+function shortDate(value){return new Date(value<1e12?value*1000:value).toLocaleString('zh-CN',{month:'long',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});}
 async function loadFiles(){if(!permission('files'))throw new Error('没有文件权限。');const epoch=S.epoch;const requested=S.filePath;const result=await api(apiProject('files',{path:requested}));if(epoch!==S.epoch||requested!==S.filePath)return;$('file-path').textContent=`/${requested==='.'?'':requested}`;$('file-list').replaceChildren();for(const entry of result.entries){if(entry.type==='directory'){const button=el('button',`▸ ${entry.name}`,'file-entry');button.onclick=action(async()=>{S.filePath=entry.path;await loadFiles();});$('file-list').append(button);}else{const link=el('a',entry.name,'file-entry');link.href=apiProject('files/content',{path:entry.path});link.download=entry.name;link.append(el('span',bytes(entry.size)));$('file-list').append(link);}}if(!result.entries.length)$('file-list').append(el('p','空目录或没有可展示的文件。','footnote')); }
 async function loadDiff(){if(!permission('files'))throw new Error('没有文件权限。');const epoch=S.epoch;const result=await api(apiProject('diff'));if(epoch===S.epoch)$('diff-content').textContent=(result.text||'没有未提交的差异。')+(result.truncated?'\n[已截断到 256 KiB]':''); }
 async function switchPanel(panel){S.panel=panel;for(const name of ['quota','files','diff'])$('panel-'+name).hidden=name!==panel;for(const b of document.querySelectorAll('[data-panel]')){const active=b.dataset.panel===panel;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active));}if(panel==='files')await loadFiles();if(panel==='quota')await loadQuota();}
@@ -228,13 +360,14 @@ $('login-form').onsubmit=async event=>{event.preventDefault();const button=event
 $('logout').onclick=action(async()=>{await api('/api/logout',{});loggedOut();});
 $('project-select').onchange=action(()=>chooseProject($('project-select').value));
 $('thread-filter').oninput=renderThreads;$('refresh-threads').onclick=action(()=>loadThreads());$('more-threads').onclick=action(()=>loadThreads(true));
-$('new-thread').onclick=()=>{$('new-thread-title').value='';$('new-thread-dialog').showModal();};
+$('new-thread').onclick=action(startNewConversation);
 $('cancel-new-thread').onclick=()=>$('new-thread-dialog').close();
-$('new-thread-form').onsubmit=action(async()=>{const title=$('new-thread-title').value;const epoch=S.epoch;const submit=document.querySelector('#new-thread-form button[type=submit]');if(submit.disabled)return;submit.disabled=true;try{const thread=await api('/api/codex/threads',{projectId:S.project.id,title});$('new-thread-dialog').close();if(epoch===S.epoch){S.threads.unshift(thread);await selectThread(thread);}}finally{submit.disabled=false;}});
-$('composer').onsubmit=action(sendMessage);$('prompt').onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();if(!$('send').disabled)$('composer').requestSubmit();}};
-$('model').onchange=loadEfforts;$('stop').onclick=action(async()=>{await api(`/api/codex/threads/${encodeURIComponent(S.thread.id)}/interrupt`,{projectId:S.project.id});});
-$('attach').onclick=()=>$('upload').click();$('upload').onchange=action(uploadFile);
-$('connect').onclick=action(async()=>{await api('/api/codex/admin/connect',{});await refreshContext();if(S.thread)await syncSnapshot();toast('已连接已有 Codex。');});
+$('new-thread-form').onsubmit=action(async()=>{if(!supports('createThread'))throw new Error('此连接不支持新建任务。');const title=$('new-thread-title').value;const epoch=S.epoch;const submit=document.querySelector('#new-thread-form button[type=submit]');if(submit.disabled)return;submit.disabled=true;try{const thread=await api('/api/codex/threads',{projectId:S.project.id,title});$('new-thread-dialog').close();if(epoch===S.epoch){S.threads.unshift(thread);await selectThread(thread);}}finally{submit.disabled=false;}});
+$('composer').onsubmit=action(sendMessage);$('prompt').onkeydown=promptKey;
+$('prompt').oninput=()=>{S.menuIndex=0;if(/^\/[^\n]*$/.test($('prompt').value)){openMenu('slash').catch(e=>toast(e.message,true));}else if(S.menuMode==='slash')closeMenu();};
+$('model').onchange=()=>{loadEfforts();markSettings('model','effort');};$('effort').onchange=()=>markSettings('effort');$('mode').onchange=()=>markSettings('mode');$('follow-desktop').onclick=()=>{if(S.sending)return;S.settingsOverrides={};renderThreadSettings();};$('stop').onclick=action(async()=>{await api(`/api/codex/threads/${encodeURIComponent(S.thread.id)}/interrupt`,{projectId:S.project.id});});
+$('attach').onclick=action(()=>S.menuOpen?closeMenu():openMenu('plus'));$('upload').onchange=action(uploadFile);
+$('connect').onclick=action(async()=>{await api('/api/codex/admin/connect',{});await refreshContext();if(S.thread)await syncSnapshot();toast('已连接');});
 $('settings').onclick=action(openSettings);$('close-settings').onclick=()=>$('settings-dialog').close();
 $('config-form').onsubmit=action(async()=>{const transport={type:$('transport').value,endpoint:$('endpoint').value.trim()};if($('token-env').value.trim())transport.bearerTokenEnv=$('token-env').value.trim();await api('/api/codex/admin/config',{enabled:$('enabled').checked,transport,maxConcurrentTurns:Number($('concurrency').value),projects:JSON.parse($('projects-json').value)},'PUT');clearConversation();await refreshContext();toast('配置已保存。请手动连接 Codex。');$('settings-dialog').close();});
 $('disconnect').onclick=action(async()=>{await api('/api/codex/admin/disconnect',{});clearConversation();await refreshContext();});
@@ -244,6 +377,157 @@ $('cancel-edit-user').onclick=()=>{$('user-form').reset();$('edit-user-id').valu
 for(const button of document.querySelectorAll('[data-panel]'))button.onclick=action(()=>switchPanel(button.dataset.panel));
 $('refresh-quota').onclick=action(loadQuota);$('refresh-files').onclick=action(loadFiles);$('refresh-diff').onclick=action(loadDiff);$('files-up').onclick=action(async()=>{S.filePath=S.filePath.includes('/')?S.filePath.slice(0,S.filePath.lastIndexOf('/')):'.';await loadFiles();});
 $('menu-toggle').onclick=()=>$('sidebar').classList.toggle('mobile-open');$('inspect-toggle').onclick=()=>$('inspector').classList.toggle('inspect-open');$('close-inspector').onclick=()=>$('inspector').classList.remove('inspect-open');
-document.addEventListener('visibilitychange',()=>{clearTimeout(S.hiddenTimer);if(document.hidden)S.hiddenTimer=setTimeout(()=>{closeStream();$('stream-state').textContent='后台标签页已暂停；返回后续传';},15000);else if(!S.stream&&S.thread&&S.connected)openStream();});
+document.addEventListener('visibilitychange',()=>{clearTimeout(S.hiddenTimer);if(document.hidden)S.hiddenTimer=setTimeout(()=>{closeStream();$('stream-state').textContent='已暂停';},15000);else if(!S.stream&&S.thread&&S.connected)openStream();});
 window.addEventListener('pagehide',closeStream);
+window.addEventListener('focus',()=>{if(S.connected&&S.attachedThreadId)loadModels().catch(e=>notice(e.message));});
 api('/api/session').then(signedIn).catch(error=>{if(error.status!==401)toast(error.message,true);});
+
+const commands=[
+  {id:'upload',label:'上传文件',description:'从本机添加附件',command:'/upload',files:true},
+  {id:'references',label:'项目文件和文件夹',description:'引用当前项目中的路径',command:'/files',files:true},
+  {id:'new',label:'新建任务',description:'开始新的对话',command:'/new'},
+  {id:'plan',label:'计划模式',description:'先制定计划',command:'/plan'},
+  {id:'code',label:'执行模式',description:'执行任务',command:'/code'},
+  {id:'model',label:'模型',description:'选择模型与推理强度',command:'/model'},
+  {id:'permissions',label:'访问权限',description:'默认、只读或完全访问',command:'/permissions'},
+  {id:'skills',label:'技能',description:'选择当前项目可用的技能',command:'/skills'},
+  {id:'plugins',label:'插件',description:'选择已安装的插件',command:'/plugins'},
+  {id:'mcp',label:'MCP',description:'查看服务器状态',command:'/mcp'},
+  {id:'status',label:'状态',description:'任务 ID、上下文用量',command:'/status'},
+  {id:'goal',label:'目标',description:'设置任务目标',command:'/goal'},
+  {id:'diff',label:'Diff',description:'查看项目变更',command:'/diff',files:true},
+  {id:'stop',label:'停止',description:'中断当前任务',command:'/stop'}
+];
+async function loadCatalog(refresh=false){
+  if(!S.project || !S.connected)return null;
+  if(!supports('extensions')){S.catalogProject=S.project.id;return S.catalog={entries:[],skillsAvailable:false,pluginsAvailable:false,issues:['技能与插件：请在桌面使用']};}
+  const projectId=S.project.id;
+  if(!refresh && S.catalog && S.catalogProject===projectId)return S.catalog;
+  if(!refresh && S.catalogRequest?.projectId===projectId)return S.catalogRequest.promise;
+  const promise=api(apiProject('extensions',refresh?{refresh:'1'}:{}));S.catalogRequest={projectId,promise};
+  try{const result=await promise;if(S.project?.id!==projectId)return null;S.catalog=result;S.catalogProject=projectId;return result;}
+  finally{if(S.catalogRequest?.promise===promise)S.catalogRequest=null;}
+}
+async function openMenu(mode='plus',refresh=false){
+  if(!S.project || !S.connected)return;
+  if((mode==='skills'||mode==='plugins')&&!supports('extensions')){toast('此连接暂不支持，请在 Codex 桌面使用。');return;}
+  const changing=!S.menuOpen || S.menuMode!==mode;
+  S.menuMode=mode;S.menuOpen=true;
+  if(changing){S.menuIndex=0;$('menu-query').value='';}
+  $('composer-menu').hidden=false;$('attach').setAttribute('aria-expanded','true');$('prompt').setAttribute('aria-expanded',String(mode==='slash'));
+  $('menu-title').textContent=({plus:'添加',slash:'命令与技能',skills:'技能',plugins:'插件'})[mode];
+  $('menu-query').hidden=mode==='slash';
+  renderMenu();
+  if(mode!=='slash' && changing)$('menu-query').focus();
+  await loadCatalog(refresh);
+  if(S.menuOpen)renderMenu();
+}
+function closeMenu(){S.menuOpen=false;$('composer-menu').hidden=true;$('attach').setAttribute('aria-expanded','false');$('prompt').setAttribute('aria-expanded','false');$('prompt').removeAttribute('aria-activedescendant');}
+function renderMenu(){
+  if(!S.menuOpen)return;
+  const query=(S.menuMode==='slash'?$('prompt').value.replace(/^\//,''):$('menu-query').value).trim().toLowerCase();
+  const entries=(supports('extensions')&&S.catalogProject===S.project?.id?S.catalog?.entries:[])||[];
+  const common=S.menuMode==='plus'?['upload','references','goal','plan']:['new','plan','permissions','mcp','status','goal'];
+  const basic=['plus','slash'].includes(S.menuMode)?commands.filter(c=>(query||common.includes(c.id))&&commandAvailable(c)).map(c=>({...c,kind:'command',enabled:c.id!=='stop'||S.status==='running'})):[];
+  const filtered=entries.filter(e=>S.menuMode!=='skills'&&S.menuMode!=='plugins'||e.kind===(S.menuMode==='skills'?'skill':'plugin'));
+  const ordered=S.menuMode==='plus'?[...filtered.filter(e=>e.kind==='plugin'),...filtered.filter(e=>e.kind==='skill')]:filtered;
+  const all=[...basic,...ordered];
+  S.menuItems=all.filter(e=>`${e.label} ${e.name||''} ${e.description||''} ${e.command||''}`.toLowerCase().includes(query)).slice(0,100);
+  if(S.menuIndex>=S.menuItems.length)S.menuIndex=0;
+  const container=$('menu-list');container.replaceChildren();let lastGroup='';
+  for(const [index,item] of S.menuItems.entries()){
+    const group=({command:'功能',skill:'技能',plugin:'插件'})[item.kind];
+    if(group!==lastGroup){container.append(el('div',group,'menu-group'));lastGroup=group;}
+    const row=el('button',undefined,'menu-option');row.type='button';row.id=`menu-item-${index}`;row.setAttribute('role','option');row.setAttribute('aria-selected',String(index===S.menuIndex));
+    row.disabled=!item.enabled;
+    const label=el('div',undefined,'menu-option-main');label.append(el('strong',item.label),el('span',item.description||'', 'menu-description'));
+    const meta=item.kind==='command'?item.command:item.enabled?(item.kind==='plugin'?'插件':({user:'个人',repo:'项目',system:'系统',admin:'管理'})[item.scope]||'技能'):'已禁用';
+    row.append(label,el('span',meta,'menu-meta'));row.onclick=action(()=>chooseMenu(index));container.append(row);
+  }
+  $('menu-status').textContent=!S.catalog?'读取技能与插件…':S.catalog.issues?.join('；')||(!S.menuItems.length?'没有匹配项':S.menuItems.length===100?'输入名称缩小范围':'');
+  $('prompt').setAttribute('aria-activedescendant',`menu-item-${S.menuIndex}`);
+}
+async function chooseMenu(index){
+  const item=S.menuItems[index];if(!item?.enabled)return;
+  if(item.kind==='command'&&!commandAvailable(item))return;
+  if(item.kind!=='command'&&!supports('extensions'))return;
+  const slash=S.menuMode==='slash';if(slash)$('prompt').value='';
+  closeMenu();
+  if(item.kind!=='command'){
+    if(S.selected.length>=12)throw new Error('最多选择 12 个技能或插件。');
+    if(!S.selected.some(e=>e.id===item.id))S.selected.push(item);
+    renderAttachments();$('prompt').focus();return;
+  }
+  switch(item.id){
+    case 'upload':$('upload').click();break;
+    case 'references':await openReferences();break;
+    case 'new':await startNewConversation();break;
+    case 'plan':$('mode').value='plan';markSettings('mode');$('prompt').focus();break;
+    case 'code':$('mode').value='code';markSettings('mode');$('prompt').focus();break;
+    case 'model':$('model').focus();if(typeof $('model').showPicker==='function')try{$('model').showPicker();}catch{}break;
+    case 'permissions':$('access').focus();if(typeof $('access').showPicker==='function')try{$('access').showPicker();}catch{}break;
+    case 'skills':await openMenu('skills');break;
+    case 'plugins':await openMenu('plugins');break;
+    case 'mcp':await showMcp();break;
+    case 'status':await showStatus();break;
+    case 'goal':await openGoal();break;
+    case 'diff':$('inspector').classList.add('inspect-open');await switchPanel('diff');await loadDiff();break;
+    case 'stop':$('stop').click();break;
+  }
+}
+function menuKey(event){
+  if(!S.menuOpen)return false;
+  if(event.key==='Escape'){event.preventDefault();closeMenu();$('prompt').focus();return true;}
+  if(['ArrowDown','ArrowUp'].includes(event.key)){
+    event.preventDefault();const length=S.menuItems.length;if(length){S.menuIndex=(S.menuIndex+(event.key==='ArrowDown'?1:-1)+length)%length;renderMenu();document.getElementById(`menu-item-${S.menuIndex}`)?.scrollIntoView({block:'nearest'});}return true;
+  }
+  if((event.key==='Enter'&&!event.ctrlKey&&!event.metaKey)||event.key==='Tab'){
+    if(S.menuItems[S.menuIndex]){event.preventDefault();chooseMenu(S.menuIndex).catch(e=>toast(e.message,true));return true;}
+  }
+  return false;
+}
+function promptKey(event){if(menuKey(event))return;if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();closeMenu();if(!$('send').disabled)$('composer').requestSubmit();}}
+let confirmResolve=null;
+function confirmAction(title,description){
+  if(confirmResolve)return Promise.resolve(false);
+  $('confirm-title').textContent=title;$('confirm-description').textContent=description;$('confirm-dialog').showModal();
+  return new Promise(resolve=>confirmResolve=resolve);
+}
+function finishConfirm(value){const resolve=confirmResolve;confirmResolve=null;$('confirm-dialog').close();resolve?.(value);}
+async function selectAccess(){
+  markSettings('access');S.accessConfirmed=false;
+  if($('access').value==='full'){
+    const confirmed=S.user?.admin&&await confirmAction('完全访问','允许 Codex 访问项目外文件和网络，并跳过操作审批。仅对可信任务启用。');
+    if(confirmed)S.accessConfirmed=true;else $('access').value='default';
+  }
+}
+function showInfo(title){$('info-title').textContent=title;$('info-content').replaceChildren();$('info-dialog').showModal();return $('info-content');}
+async function showMcp(){const root=showInfo('MCP');root.append(el('p','读取中…','muted'));try{const result=await api(apiProject('mcp',S.thread?{threadId:S.thread.id}:{}));root.replaceChildren();if(!result.data.length)root.append(el('p','未配置 MCP 服务器','muted'));for(const server of result.data){const card=el('section',undefined,'info-row');card.append(el('strong',server.name),el('p',`${server.runtimeStatus||'状态未知'} · ${server.authStatus||'认证状态未知'} · ${server.tools.length} 个工具`,'footnote'));if(server.tools.length){const details=el('details');details.append(el('summary','工具'),el('pre',server.tools.join('\n')));card.append(details);}root.append(card);}if(result.more)root.append(el('p','仅显示前 100 项','footnote'));}catch(error){root.textContent=error.message;}}
+async function showStatus(){
+  if(S.thread)await syncSnapshot();const root=showInfo('状态');
+  const rows=[['项目',S.project?.name||'未选择'],['任务 ID',S.thread?.id||'尚未创建'],['状态',stateName(S.status)],['模型',$('model').value],['权限',$('access').selectedOptions[0].textContent]];
+  const usage=S.tokenUsage;if(usage){rows.push(['累计 tokens',String(usage.total)],['最近一轮 tokens',String(usage.last)]);if(usage.contextWindow)rows.push(['上下文窗口',String(usage.contextWindow)]);}else rows.push(['上下文用量','尚未收到 Codex 用量数据']);
+  for(const [label,value] of rows){const row=el('div',undefined,'status-row');row.append(el('span',label,'muted'),el('code',value));root.append(row);}
+}
+async function openGoal(){
+  $('goal-objective').value=S.goalDraft;
+  if(S.thread){try{const result=await api(apiProject(`threads/${encodeURIComponent(S.thread.id)}/goal`));$('goal-objective').value=result.goal?.objective||'';}catch(error){toast(error.message,true);}}
+  $('goal-dialog').showModal();
+}
+async function openReferences(){S.referencePath='.';$('reference-dialog').showModal();await renderReferences();}
+function addReference(value){if(S.references.length>=12)throw new Error('最多引用 12 个文件或文件夹。');if(!S.references.includes(value))S.references.push(value);renderAttachments();$('reference-dialog').close();$('prompt').focus();}
+async function renderReferences(){
+  const epoch=S.epoch,requested=S.referencePath;const result=await api(apiProject('files',{path:requested}));if(epoch!==S.epoch||requested!==S.referencePath)return;
+  $('reference-path').textContent=requested;$('reference-list').replaceChildren();
+  for(const entry of result.entries){const row=el('div',undefined,'reference-row'),open=el('button',(entry.type==='directory'?'▸ ':'')+entry.name,'file-entry');open.type='button';open.onclick=action(()=>entry.type==='directory'?(S.referencePath=entry.path,renderReferences()):addReference(entry.path));row.append(open);const add=el('button','引用','small');add.type='button';add.onclick=action(()=>addReference(entry.path));row.append(add);$('reference-list').append(row);}
+}
+$('menu-query').oninput=()=>{S.menuIndex=0;renderMenu();};$('menu-query').onkeydown=menuKey;
+$('refresh-menu').onclick=action(()=>openMenu(S.menuMode,true));$('close-menu').onclick=closeMenu;
+$('sidebar-plugins').onclick=action(()=>openMenu('plus'));
+$('access').onchange=action(selectAccess);$('cancel-confirm').onclick=()=>finishConfirm(false);
+$('confirm-form').onsubmit=event=>{event.preventDefault();finishConfirm(true);};$('confirm-dialog').addEventListener('cancel',()=>finishConfirm(false));
+$('confirm-dialog').addEventListener('close',()=>{if(confirmResolve)finishConfirm(false);});
+$('close-info').onclick=()=>$('info-dialog').close();$('close-goal').onclick=()=>$('goal-dialog').close();
+$('goal-form').onsubmit=action(async()=>{const objective=$('goal-objective').value.trim();if(S.thread){await api(`/api/codex/threads/${encodeURIComponent(S.thread.id)}/goal`,{projectId:S.project.id,objective},'PUT');}else S.goalDraft=objective;renderAttachments();$('goal-dialog').close();$('prompt').focus();});
+$('close-references').onclick=()=>$('reference-dialog').close();$('reference-up').onclick=action(async()=>{S.referencePath=S.referencePath.includes('/')?S.referencePath.slice(0,S.referencePath.lastIndexOf('/')):'.';await renderReferences();});$('reference-current').onclick=action(()=>addReference(S.referencePath));
+document.addEventListener('pointerdown',event=>{if(S.menuOpen&&!$('composer-menu').contains(event.target)&&event.target!==$('prompt')&&!$('attach').contains(event.target))closeMenu();});

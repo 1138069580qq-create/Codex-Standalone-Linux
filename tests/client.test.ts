@@ -28,3 +28,8 @@ test('UI has no HTML injection, polling, external assets, or frontend build requ
   assert.doesNotMatch(html,/(?:src|href)="https?:\/\//);
   assert.match(source,/document\.hidden/);assert.match(source,/new EventSource/);assert.match(source,/fingerprint/);
 });
+
+test('quota labels match actual durations, including the weekly window',()=>{
+  const label=context.module.exports.windowLabel;
+  assert.equal(label(10080),'一周');assert.equal(label(43200),'30 天窗口');assert.equal(label(300),'5 小时');assert.equal(label(undefined),'额度窗口');
+});

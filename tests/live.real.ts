@@ -10,6 +10,7 @@ import { CodexRpcClient } from "../src/backend/transport";
 import { discoverExistingCodex } from "../src/backend/discovery";
 import { UserStore } from "../src/auth";
 import { ProtectedConfigStore } from "../src/protected-config";
+import { installCatalogFixture } from "./fixtures/catalog";
 import { createApp } from "../src/server";
 async function freePort() { const server=createServer();server.listen(0,'127.0.0.1');await once(server,'listening');const port=(server.address() as any).port;await new Promise<void>(resolve=>server.close(()=>resolve()));return port; }
 const binary=process.env.CODEX_TEST_BINARY;
@@ -22,9 +23,10 @@ for (const type of ['unix','websocket'] as const) test(`real Codex ${type}: init
   const endpoint=type==='unix'?path.join(directory,'app-server.sock'):`ws://127.0.0.1:${await freePort()}`;
   const listen=type==='unix'?`unix://${endpoint}`:endpoint;
   const version=execFileSync(binary!,['--version'],{encoding:'utf8'}).trim();
+  const fixture=await installCatalogFixture(binary!,home,project);
   let stderr='';
   // Test-only real process. Production src/ never imports this or launches Codex.
-  const child=spawn(binary!,['app-server','--listen',listen],{env:{...process.env,CODEX_HOME:home},stdio:['ignore','ignore','pipe']});
+  const child=spawn(binary!,['app-server','--listen',listen],{env:fixture.env,stdio:['ignore','ignore','pipe']});
   child.stderr.on('data',chunk=>{stderr=(stderr+chunk.toString()).slice(-8000);});
   t.after(async()=>{if(child.exitCode===null){child.kill('SIGTERM');await Promise.race([once(child,'exit'),new Promise(r=>setTimeout(r,3000))]);if(child.exitCode===null)child.kill('SIGKILL');}});
   let peer:CodexRpcClient|undefined;
@@ -48,12 +50,21 @@ for (const type of ['unix','websocket'] as const) test(`real Codex ${type}: init
   const base=`http://127.0.0.1:${(http.address() as any).port}`;
   const login=await fetch(base+'/api/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:'admin',password:'real-test-password-only'})});
   const cookie=login.headers.get('set-cookie')!.split(';')[0],csrf=(await login.json() as any).csrf;
-  async function api(route:string,body?:any){const r=await fetch(base+'/api/codex'+route,{method:body===undefined?'GET':'POST',headers:{cookie,'x-csrf-token':csrf,'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const value=await r.json();assert.equal(r.status,200,JSON.stringify(value));return value as any;}
+  async function api(route:string,body?:any,method=body===undefined?'GET':'POST'){const r=await fetch(base+'/api/codex'+route,{method,headers:{cookie,'x-csrf-token':csrf,'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const value=await r.json();assert.equal(r.status,200,JSON.stringify(value));return value as any;}
   assert.equal((await api('/status')).connected,false); // HTTP startup must not auto-attach/start Codex.
   assert.equal((await api('/admin/connect',{})).connected,true);
   assert.ok((await api('/models')).data.length);
+  const catalog=await api('/extensions?projectId=live');
+  assert.equal(catalog.skillsAvailable,true); assert.equal(catalog.pluginsAvailable,true);
+  assert.ok(catalog.entries.some((e:any)=>e.kind==='skill'&&e.name==='review-fixture'&&e.enabled),JSON.stringify(catalog));
+  assert.ok(catalog.entries.some((e:any)=>e.kind==='plugin'&&e.name==='qa-docs'&&e.enabled),JSON.stringify(catalog));
+  assert.ok(!JSON.stringify(catalog).includes('"input":'));
+  const mcp=await api('/mcp?projectId=live');assert.ok(Array.isArray(mcp.data));
   assert.ok(Array.isArray((await api('/threads?projectId=live')).data));
-  const created=await api('/threads',{projectId:'live',title:'Real protocol test — no model turn'});assert.ok(created.id);
+  const created=await api('/threads',{projectId:'live',title:'Real protocol test — no model turn',requestId:'real-create-idempotent-1'});assert.ok(created.id);
+  const again=await api('/threads',{projectId:'live',title:'Real protocol test — no model turn',requestId:'real-create-idempotent-1'});assert.equal(again.id,created.id);
+  const initialGoal=await api(`/threads/${created.id}/goal?projectId=live`);assert.equal(initialGoal.goal,null);
+  const savedGoal=await api(`/threads/${created.id}/goal`,{projectId:'live',objective:'Protocol test only; no model invocation'},'PUT');assert.equal(savedGoal.goal.objective,'Protocol test only; no model invocation');
   // Read a thread through the actual WebUI snapshot/SSE path (no canned backend).
   const snapshot=await api(`/threads/${created.id}?projectId=live`);assert.equal(snapshot.id,created.id);assert.ok(Array.isArray(snapshot.items));
   const abort=new AbortController();

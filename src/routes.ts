@@ -8,11 +8,13 @@ import { CommandReceipts } from "./backend/receipts";
 import { CodexConsoleService } from "./backend/service";
 import { listProjectFiles, openProjectDownload, uploadProjectFile, projectDiff } from "./backend/files";
 
+export type ServiceFactory = (config: ConfigStore, receipts: CommandReceipts) => CodexConsoleService;
+
 export async function createCodexRoutes(config: ConfigStore, publicOrigin: string,
-  sessionIdentity: (ctx: Koa.Context) => Identity | null) {
+  sessionIdentity: (ctx: Koa.Context) => Identity | null, factory?: ServiceFactory) {
   const receipts = new CommandReceipts(path.join(path.dirname(config.file), "receipts.json"));
   await receipts.load();
-  const service = new CodexConsoleService(config, receipts);
+  const service = factory ? factory(config, receipts) : new CodexConsoleService(config, receipts);
   const streams = new Set<PassThrough>();
   const router = new Router({ prefix: "/api/codex" });
   function identity(c: Koa.Context): Identity {
@@ -108,6 +110,10 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
     "/models",
     wrap((_c, who) => service.models(who))
   );
+  router.get("/extensions",wrap((c,who)=>{ rateLimit(who,"extensions",30); return service.extensions(who,param(c,"projectId",64),c.query.refresh==="1"); }));
+  router.get("/mcp",wrap((c,who)=>service.mcp(who,param(c,"projectId",64),param(c,"threadId",128)||undefined)));
+  router.get("/threads/:id/goal",wrap((c,who)=>service.goal(who,param(c,"projectId",64),c.params.id)));
+  router.put("/threads/:id/goal",wrap((c,who)=>{ const b=body(c); return service.goal(who,b.projectId,c.params.id,b.objective); }));
   router.get(
     "/threads",
     wrap((c, who) => service.listThreads(who, param(c, "projectId", 64), param(c, "cursor")))

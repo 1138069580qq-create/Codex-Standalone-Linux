@@ -23,3 +23,12 @@ Opening a task invokes `thread/resume`, which attaches the WebUI client to that 
 Production transport code rejects stdio / process-launch configuration and never spawns Codex. Only explicitly enabled integration tests launch an isolated **real Codex test process**, with a fresh CODEX_HOME, no copied authentication, and no model invocation.
 
 A working test process proves wire compatibility, not that any particular desktop instance exposes an externally usable endpoint. Browser login is independent of Codex account login. This repo does not scrape desktop authentication or bypass endpoint restrictions.
+
+
+## v1.1 desktop attachment (experimental, 2026-09-08)
+
+The optional desktop runner attaches to an explicitly selected existing local task through the desktop's owner/follower IPC, not the standard app-server WebSocket. The owner identity and thread are checked. This is version-sensitive internal IPC, not an official compatibility guarantee. No vendor application code or credentials are included in this repository.
+
+Snapshots / patches synchronize public history and task settings. Default sends use desktop setting inheritance; only explicit user overrides are forwarded. Model metadata comes from the desktop config's model_catalog_json (if set) or its fallback cache, with filesystem change notifications. Only allowlisted model metadata is exposed; provider credentials and model instructions are never returned. Catalog metadata does not prove upstream model availability. Quota/reset cards, extension catalogs, MCP, goal writes and approval replies are not implemented by this desktop adapter.
+
+Regular app-server mode additionally adapts skills/list, plugin/installed, mcpServerStatus/list and thread/goal APIs where supported. Skills and installed plugin selections are validated on the backend and translated to server-owned structured inputs.

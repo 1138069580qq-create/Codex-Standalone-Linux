@@ -75,6 +75,7 @@ test("production HTTP: auth, CSRF, origin, ACL, static compression, ETag, no sec
   response=await call('/app.js',undefined,'GET',{'accept-encoding':'br'});assert.equal(response.status,200);assert.equal(response.headers.get('content-encoding'),'br');assert.match(response.headers.get('content-security-policy')!,/frame-ancestors 'none'/);
   const tag=response.headers.get('etag')!;assert.ok((await response.text()).includes('openStream'));
   response=await call('/app.js',undefined,'GET',{'if-none-match':tag});assert.equal(response.status,304);
+  response=await call('/');const html=await response.text();assert.match(html,/app\.js\?v=[a-f0-9]{12}/);assert.match(html,/state\.js\?v=[a-f0-9]{12}/);
   response=await call('/src/auth.ts');assert.equal(response.status,404);
   response=await call('/users.json');assert.equal(response.status,404);
   response=await call('/healthz');assert.deepEqual(await response.json(),{ok:true});

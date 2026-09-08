@@ -10,10 +10,10 @@ import { UserStore, Sessions, RateLimiter, hashPassword, verifyPassword, publicU
 import { ConsoleError, requireAdmin } from "./backend/config";
 import { ProtectedConfigStore } from "./protected-config";
 import { settings } from "./settings";
-import { createCodexRoutes } from "./routes";
+import { createCodexRoutes, type ServiceFactory } from "./routes";
 const zip = promisify(gzip);
 const staticDir = path.resolve(__dirname, "../public");
-export async function createApp(options = settings()) {
+export async function createApp(options = settings(), serviceFactory?: ServiceFactory) {
   const app = new Koa();
   // Explicit external origin, never trust arbitrary X-Forwarded-* headers.
   app.proxy = false;
@@ -28,7 +28,7 @@ export async function createApp(options = settings()) {
   let authInFlight = 0; let parsing = 0;
   const token = (ctx: Koa.Context) => ctx.cookies.get(cookieName, { signed: false }) || "";
   const current = (ctx: Koa.Context) => sessions.get(token(ctx), users);
-  const routes = await createCodexRoutes(config, options.origin, ctx => current(ctx)?.identity || null);
+  const routes = await createCodexRoutes(config, options.origin, ctx => current(ctx)?.identity || null, serviceFactory);
   function setCookie(ctx: Koa.Context, value: string, maxAge: number) {
     // TLS may terminate at the configured reverse proxy. Origin is startup-validated.
     ctx.cookies.secure = options.secureCookies;
@@ -123,8 +123,15 @@ export async function createApp(options = settings()) {
   app.use(routes.router.routes()).use(routes.router.allowedMethods());
   const assets = new Map<string, { raw: Buffer; gzip: Buffer; br: Buffer; etag: string; type: string }>();
   const allowed = [["/", "index.html", "text/html"], ["/app.js", "app.js", "text/javascript"], ["/state.js", "state.js", "text/javascript"], ["/style.css", "style.css", "text/css"]];
+  const assetVersions = new Map<string,string>();
+  for(const [route,filename] of allowed) if(route !== "/") assetVersions.set(route,createHash("sha256").update(await fs.readFile(path.join(staticDir,filename))).digest("hex").slice(0,12));
   for (const [route, filename, type] of allowed) {
-    const raw = await fs.readFile(path.join(staticDir, filename));
+    let raw = await fs.readFile(path.join(staticDir, filename));
+    if(route === "/") {
+      let html=raw.toString("utf8");
+      for(const [asset,version] of assetVersions) html=html.replaceAll(`"${asset}"`,`"${asset}?v=${version}"`);
+      raw=Buffer.from(html);
+    }
     assets.set(route, { raw, gzip: gzipSync(raw), br: brotliCompressSync(raw), etag: `W/"${createHash("sha256").update(raw).digest("hex").slice(0, 20)}"`, type });
   }
   app.use(ctx => {

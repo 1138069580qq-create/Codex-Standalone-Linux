@@ -332,3 +332,28 @@ test("service rejects unauthorized subscriptions before making any backend reque
   );
   assert.equal(peer.requests.length, before);
 });
+
+
+test("skill selection and read-only access reach turn/start as structured inputs", async t => {
+  const {service,peer,identity,roots}=await fixture();t.after(()=>service.disconnect());
+  const original=peer.request.bind(peer);
+  (peer as any).request=async(method:string,params:any)=>{
+    if(method==='skills/list')return {data:[{cwd:roots.alpha,skills:[{name:'review',description:'Review',path:path.join(roots.alpha,'SKILL.md'),scope:'repo',enabled:true}]}]};
+    if(method==='plugin/installed')return {marketplaces:[]};
+    return original(method,params);
+  };
+  const catalog=await service.extensions(identity,'alpha');
+  const pending=service.send(identity,'alpha','thread-alpha',{text:'Review',requestId:'structured-turn-request',extensions:[catalog.entries[0].id],access:'read-only'});
+  await peer.waitForTurnStarts(1);
+  const call=peer.turnStarts[0].params;
+  assert.equal(call.input[1].type,'skill');assert.equal(call.input[1].path,path.join(roots.alpha,'SKILL.md'));
+  assert.deepEqual(call.sandboxPolicy,{type:'readOnly',networkAccess:false});assert.equal(call.approvalPolicy,'never');
+  peer.resolveTurnStart('thread-alpha');await pending;
+});
+
+test("forged full access and cross-project extension requests cannot start a turn", async t => {
+  const {service,peer,identity}=await fixture();t.after(()=>service.disconnect());
+  await assert.rejects(service.extensions({uuid:'outsider',elevated:false},'alpha'),/denied/i);
+  await assert.rejects(service.send(identity,'alpha','thread-alpha',{text:'Hello',requestId:'forged-full-access',access:'full',confirmFullAccess:true}),/管理员/);
+  assert.equal(peer.turnStarts.length,0);
+});
