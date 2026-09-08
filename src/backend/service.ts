@@ -1,5 +1,6 @@
 import { promises as fs } from "fs";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
+import path from "node:path";
 import { CodexRpcClient } from "./transport";
 import {
   ConsoleError,
@@ -7,6 +8,7 @@ import {
   Identity,
   Project,
   requireProject,
+  requireAdmin,
   permissions
 } from "./config";
 import { ReplayHub } from "./events";
@@ -17,6 +19,7 @@ import {
   threadTitle,
   TimelineItem
 } from "./normalize";
+import { prepareProjectDirectory,materializeProjectDirectory } from './projects';
 import { CommandReceipts } from "./receipts";
 import { attachmentPath, projectReference } from "./files";
 import { discoverExistingCodex, type DiscoveredCodexEndpoint } from "./discovery";
@@ -80,6 +83,7 @@ export class CodexConsoleService {
       userId: identity.uuid,
       admin: identity.elevated,
       reason: this.peer?.connected ? undefined : this.reason,
+      capabilities:{projects:identity.elevated,projectless:identity.elevated,taskActions:true},
       maxConcurrentTurns: this.config.value.maxConcurrentTurns
     };
   }
@@ -190,20 +194,52 @@ export class CodexConsoleService {
   ): Project {
     if (!this.config.value.enabled)
       throw new ConsoleError(409, "DISABLED", "Codex console is disabled.");
+    if(id==='projectless'){requireAdmin(identity);if(capability==='files')throw new ConsoleError(403,'PROJECTLESS_FILES','无项目对话不开放项目文件浏览。');return {id,name:'无项目对话',root:path.dirname(this.config.file)+'-chats',grants:[]};}
     return requireProject(this.config.value, identity, id, capability);
   }
-  projects(identity: Identity) {
-    return this.config.value.projects
+  async refreshProjects(identity: Identity) { return this.projects(identity); }
+  async createProject(identity:Identity,input:any):Promise<any>{
+    requireAdmin(identity);const prepared=await prepareProjectDirectory(this.config,input),canonical=prepared.root;
+    const existing=this.config.value.projects.find(p=>p.root===canonical);if(existing)return this.projects(identity).find(p=>p.id===existing.id);
+    const p={id:'p-'+createHash('sha256').update(canonical).digest('hex').slice(0,20),name:input.name.trim(),root:canonical,grants:[]};
+    return this.receipts.run(identity.uuid+':project:'+input.requestId,async()=>{await materializeProjectDirectory(this.config,prepared,p.name);await this.config.save({...this.config.value,projects:[...this.config.value.projects,p]});return this.projects(identity).find(v=>v.id===p.id);});
+  }
+  async taskAction(identity:Identity,projectId:string,id:string,action:string,input:any):Promise<any>{
+    const project=this.project(identity,projectId,'send');const thread=await this.verifyThread(project,id);
+    if(!['rename','pin','archive','fork','side','compact','review','feedback'].includes(action)||!/^[-a-zA-Z0-9_]{8,100}$/.test(input.requestId||''))throw new ConsoleError(400,'INVALID_ACTION','无效的操作或请求 ID。');
+    if(['pin','archive','fork','side','feedback'].includes(action))requireAdmin(identity);
+    if(!['rename','pin'].includes(action)&&input.confirmed!==true)throw new ConsoleError(400,'CONFIRMATION_REQUIRED','请确认操作。');
+    if(['archive','fork','side','compact','review'].includes(action)&&runtimeStatus(thread)==='running')throw new ConsoleError(409,'THREAD_BUSY','请等待当前消息结束。');
+    if(action==='rename'&&(typeof input.name!=='string'||!input.name.trim()||input.name.length>120))throw new ConsoleError(400,'INVALID_TITLE','标题为 1–120 字。');
+    if(action==='pin'&&typeof input.pinned!=='boolean')throw new ConsoleError(400,'INVALID_PIN','无效的置顶状态。');
+    if(action==='review'&&input.target!=='uncommittedChanges'&&!(input.target==='baseBranch'&&typeof input.branch==='string'&&input.branch.trim()&&input.branch.length<=200))throw new ConsoleError(400,'INVALID_REVIEW','请选择审查范围。');
+    if(action==='feedback'&&(typeof input.reason!=='string'||!input.reason.trim()||input.reason.length>4000))throw new ConsoleError(400,'INVALID_FEEDBACK','请填写反馈内容。');
+    return this.receipts.run(identity.uuid+':action:'+id+':'+action+':'+input.requestId,async()=>{
+      const rpc=(m:string,p:any)=>this.rpc().request<any>(m,p);
+      if(action==='rename'){await rpc('thread/name/set',{threadId:id,name:input.name.trim()});const session=this.sessions.get(id);if(session)session.title=input.name.trim();}
+      if(action==='pin'){await rpc('thread/section/move',{threadId:id,sectionId:input.pinned?'01984de2-8f74-7c91-a3b2-5c5e937cf318':null});return {ok:true,pinned:input.pinned};}
+      if(action==='archive')await rpc('thread/archive',{threadId:id});
+      if(action==='compact')await rpc('thread/compact/start',{threadId:id});
+      if(action==='review'){await this.open(project,id);await rpc('review/start',{threadId:id,target:input.target==='baseBranch'?{type:'baseBranch',branch:input.branch.trim()}:{type:'uncommittedChanges'},delivery:'inline'});}
+      if(action==='feedback')await rpc('feedback/upload',{threadId:id,classification:'bug',reason:input.reason.trim(),includeLogs:false,extraLogFiles:[]});
+      if(action==='fork'||action==='side'){if(input.environment&&input.environment!=='same-directory')throw new ConsoleError(400,'INVALID_ENVIRONMENT','此连接仅支持当前目录分支。');const r=await rpc('thread/fork',{threadId:id,ephemeral:action==='side',threadSource:'user',excludeTurns:true,deferGoalContinuation:true});if(!await this.sameRoot(project,r.thread?.cwd))throw new ConsoleError(502,'FORK_OUTCOME_UNKNOWN','分支结果未知，请检查 Codex。');return {ok:true,thread:{id:r.thread.id,title:threadTitle(r.thread),status:runtimeStatus(r.thread)},temporary:action==='side'};}
+      return {ok:true};
+    });
+  }
+  projects(identity: Identity):any[] {
+    const projects=this.config.value.projects
       .filter((p) => permissions(p, identity).view)
       .map((p) => ({
         id: p.id,
         name: p.name,
         root: p.root,
-        permissions: permissions(p, identity),
+        permissions: permissions(p, identity),kind:"project",
         activeCount: [...this.sessions.values()].filter(
           (s) => s.projectId === p.id && s.status === "running"
         ).length
       }));
+    if(identity.elevated)projects.push({id:"projectless",name:"无项目对话",root:"",permissions:{view:true,send:true,approve:true,files:false},kind:"projectless",activeCount:0});
+    return projects;
   }
   async rateLimits(identity: Identity): Promise<CodexRateLimits> {
     if (
@@ -304,7 +340,7 @@ export class CodexConsoleService {
           id: thread.id,
           title: threadTitle(thread),
           status: runtimeStatus(thread),
-          updatedAt: thread.updatedAt
+          pinned:thread.section?.id==="01984de2-8f74-7c91-a3b2-5c5e937cf318",updatedAt: thread.updatedAt
         });
     }
     return { data: list, nextCursor: result.nextCursor || null };
@@ -436,6 +472,7 @@ export class CodexConsoleService {
   async taskCreation(_identity: Identity, _requestId: string): Promise<any> { throw new ConsoleError(404, 'CREATION_NOT_FOUND', 'Task creation is not available on this connection.'); }
   async createThread(identity: Identity, projectId: string, title?: string, requestId?: string) {
     const project = this.project(identity, projectId, "send");
+    if(projectId==="projectless")await fs.mkdir(project.root,{mode:0o700,recursive:false}).catch(e=>{if(e.code!=="EEXIST")throw e;});
     if (title !== undefined && (typeof title !== "string" || title.length > 120))
       throw new ConsoleError(400, "INVALID_TITLE", "Title is too long.");
     if ((await fs.realpath(project.root).catch(() => "")) !== project.root)
@@ -450,6 +487,7 @@ export class CodexConsoleService {
     const result = await this.rpc().request<any>("thread/start", {
       cwd: project.root,
       runtimeWorkspaceRoots: [project.root],
+      ...(projectId==="projectless"?{projectId:null,threadSource:"user"}:{}),
       approvalPolicy: "on-request",
       approvalsReviewer: "user",
       sandbox: "workspace-write"

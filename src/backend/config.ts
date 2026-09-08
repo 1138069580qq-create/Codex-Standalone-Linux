@@ -20,6 +20,7 @@ export interface Identity {
   role?: number;
 }
 export interface Project {
+  desktopProjectId?: string;
   id: string;
   name: string;
   root: string;
@@ -145,7 +146,7 @@ export async function validateConfig(value: unknown): Promise<ConsoleConfig> {
       users.add(g.userId);
       return { userId: g.userId, permissions: Array.from(new Set(g.permissions)) };
     });
-    projects.push({ id: p.id, name: p.name.trim(), root: root!, grants });
+    projects.push({ id: p.id, name: p.name.trim(), root: root!, grants, ...(typeof p.desktopProjectId==='string' && /^[-a-zA-Z0-9_]{1,128}$/.test(p.desktopProjectId)?{desktopProjectId:p.desktopProjectId}:{}) });
     ids.add(p.id);
   }
   return {

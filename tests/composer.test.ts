@@ -11,7 +11,7 @@ function setup() {
   elements.access.value='default';elements.prompt.value='hello';elements.model.value='test-model';elements.effort.value='low';elements.mode.value='code';
   const S:any={user:{admin:true},connected:true,project:{id:'demo'},thread:null,threads:[],status:'idle',sending:false,epoch:1,attachments:[],selected:[],references:[],goalDraft:'',accessConfirmed:false,attempt:null};
   const calls:any[]=[]; const notices:string[]=[]; let cleared=0;const storage=new Map<string,string>();
-  const c:any={module:{exports:{}},crypto:{getRandomValues:webcrypto.getRandomValues.bind(webcrypto)},Uint8Array,document:{},sessionStorage:{getItem:(k:string)=>storage.get(k)||null,setItem:(k:string,v:string)=>storage.set(k,v),removeItem:(k:string)=>storage.delete(k)},setTimeout:()=>1,clearTimeout:()=>{},confirmAction:async()=>true,el:()=>({}),loadEfforts:()=>{},S,$:(id:string)=>elements[id],permission:()=>true,stateName:(v:string)=>v,closeStream:()=>{},renderThreads:()=>{},renderAttachments:()=>{},renderSettingsSource:()=>{},notice:(v='')=>notices.push(v),clearConversation:()=>{cleared++;S.epoch++;S.thread=null;elements.prompt.value='';},syncSnapshot:async()=>{},api:async(url:string,body:any)=>{calls.push({url,body});return url.endsWith('/threads')?{id:'real-created',title:'hello',status:'idle'}:{ok:true};}};
+  const c:any={module:{exports:{}},crypto:{getRandomValues:webcrypto.getRandomValues.bind(webcrypto)},Uint8Array,document:{},sessionStorage:{getItem:(k:string)=>storage.get(k)||null,setItem:(k:string,v:string)=>storage.set(k,v),removeItem:(k:string)=>storage.delete(k)},setTimeout:()=>1,clearTimeout:()=>{},confirmAction:async()=>true,el:()=>({}),loadEfforts:()=>{},S,$:(id:string)=>elements[id],permission:()=>true,stateName:(v:string)=>v,closeStream:()=>{},renderThreads:()=>{},renderAttachments:()=>{},renderSettingsSource:()=>{},notice:(v='')=>notices.push(v),clearConversation:()=>{cleared++;S.epoch++;S.thread=null;elements.prompt.value='';},syncSnapshot:async()=>{},loadModels:async()=>{},api:async(url:string,body:any)=>{calls.push({url,body});return url.endsWith('/threads')?{id:'real-created',title:'hello',status:'idle'}:{ok:true};}};
   vm.runInNewContext(stateSource,c);c.CodexState=c.module.exports;
   for(const [a,b] of [['function supports(','async function signedIn('],['async function sendMessage()','function renderAttachments()'],['async function selectThread(','async function syncSnapshot()'],['async function loadQuota()','function renderQuota('],['async function loadCatalog(','async function openMenu(']])vm.runInNewContext(source.slice(source.indexOf(a),source.indexOf(b)),c);
   return {c,S,elements,calls,notices,get cleared(){return cleared;}};
@@ -104,7 +104,7 @@ test('ordinary app-server mode retains new-task and extension commands',async()=
   for(const id of ['new','skills','plugins','mcp','goal'])assert.equal(c.commandAvailable({id}),true,id);
 });
 
-function managed(){const result=attached();result.S.capabilities.createWithMessage=true;result.S.capabilities.switchThreads=true;result.S.project.canCreateTask=true;result.S.project.root='test-project';return result;}
+function managed(){const result=attached();result.S.capabilities.createWithMessage=true;result.S.capabilities.switchThreads=true;result.S.capabilities.firstMessageExtensions=false;result.S.project.canCreateTask=true;result.S.project.root='test-project';return result;}
 test('managed desktop enables new task and enters an empty draft only after confirmation, without a write',async()=>{
   const state=managed();const {c,S,elements,calls}=state;c.controls();assert.equal(elements['new-thread'].hidden,false);assert.equal(elements['new-thread'].disabled,false);
   c.confirmAction=async()=>false;await c.startNewConversation();assert.equal(state.cleared,0);assert.equal(calls.length,0);
@@ -130,4 +130,10 @@ test('created task whose first message failed keeps draft and does not create ag
 });
 test('managed desktop snapshot reconnect does not force a selected new task back to the anchor',async()=>{
   const {c,S}=managed();S.thread={id:'selected-new-task'};await c.restoreAttachedThread();assert.equal(S.thread.id,'selected-new-task');
+});
+test('native composer batch: all requested slash actions except pet, first-message skills, and projectless selection',async()=>{
+  const {c,S,elements,calls}=managed();S.capabilities={...S.capabilities,taskActions:true,extensions:true,mcp:true,setGoal:true,firstMessageExtensions:true,projects:true,projectless:true};S.thread={id:'current',title:'Current'};
+  for(const id of ['review','side','fork','compact','feedback','archive','new','status','goal','pin','plan','rename','skills','plugins','mcp'])assert.equal(c.commandAvailable({id}),true,id);
+  assert.ok(!source.includes("id:'pet'"));S.newTask=true;S.newTaskConfirmed=true;S.selected=[{id:'a'.repeat(32)}];S.project.kind='projectless';S.project.id='projectless';c.controls();assert.equal(elements.attach.disabled,false);assert.equal(elements.access.disabled,false);assert.equal(elements.mode.disabled,false);
+  c.api=async(url:string,body:any)=>{calls.push({url,body});return {requestId:body.requestId,projectId:'projectless',status:'unknown'};};await c.sendMessage();assert.equal(calls.length,1);assert.equal(calls[0].body.projectId,'projectless');assert.equal(calls[0].body.extensions[0],'a'.repeat(32));
 });

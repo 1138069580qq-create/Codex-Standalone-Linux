@@ -7,6 +7,7 @@ import { ProtectedConfigStore } from '../src/protected-config';
 import { createApp } from '../src/server';
 import { DesktopIpc } from '../src/backend/desktop-ipc';
 import { DesktopWorkspaceService } from '../src/backend/desktop-workspace';
+import { DesktopBridge } from '../src/backend/desktop-bridge';
 import { DesktopTools } from '../src/backend/desktop-tools';
 
 // Startup is attach-only. Task creation is available only after an explicit user submission in the WebUI.
@@ -21,14 +22,15 @@ async function main(){
   let password=process.env.CODEX_DESKTOP_WEBUI_PASSWORD;
   if(!users.users.length){password ||= randomBytes(14).toString('base64url');await users.upsert({username:'desktop-test',password,admin:true});}
   const config=new ProtectedConfigStore(path.join(dataDir,'config.json'));
-  await config.save({enabled:true,transport:{type:'unix',endpoint},maxConcurrentTurns:1,projects:[{id:'desktop',name:'桌面当前任务',root,grants:[]}]});
+  await config.load();
+  if(!config.value.projects.length)await config.save({enabled:true,transport:{type:'unix',endpoint},maxConcurrentTurns:1,projects:[{id:'desktop',name:'桌面当前任务',root,grants:[]}]});
   const port=Number(process.env.CODEX_WEBUI_PORT||3210);
   const toolsEndpoint=process.env.CODEX_APP_TOOLS_PIPE_PATH;
   const tools=toolsEndpoint?new DesktopTools(toolsEndpoint,()=>{
     const state=desktop.state,h=state?.turnHistory?.history;const turns=h?(h.islands||[]).flatMap((island:any)=>(island.entries||[]).map((entry:any)=>h.entitiesByKey?.[entry.value])).filter(Boolean):state?.turns||[];
     return {threadId:desktop.threadId,turnId:turns.at(-1)?.turnId||turns.at(-1)?.id||''};
   }):undefined;
-  const runtime=await createApp({host:'127.0.0.1',port,dataDir,origin:`http://127.0.0.1:${port}`,secureCookies:false},(c,r)=>new DesktopWorkspaceService(c,r,desktop,tools,path.join(dataDir,'desktop-tasks.json')));
+  const runtime=await createApp({host:'127.0.0.1',port,dataDir,origin:`http://127.0.0.1:${port}`,secureCookies:false},(c,r)=>new DesktopWorkspaceService(c,r,desktop,tools,path.join(dataDir,'desktop-tasks.json'),undefined,undefined,process.env.CODEX_DESKTOP_CDP_PORT?new DesktopBridge(Number(process.env.CODEX_DESKTOP_CDP_PORT)):undefined));
   await runtime.service.connect();
   const server=runtime.app.listen(port,'127.0.0.1');
   server.on('error',()=>{runtime.close();console.error('Could not listen on the requested port.');process.exitCode=1;});

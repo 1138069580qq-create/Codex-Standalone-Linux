@@ -41,3 +41,17 @@ When the running desktop explicitly supplies its local app-tools endpoint, the W
 The app-tools create operation already includes the first prompt. The WebUI stores an operation fingerprint/receipt before calling it once, attaches only a confirmed local thread ID after validating its canonical cwd, and never sends the first prompt again on a successful creation. A clientThreadId is not treated as a real thread ID. Delayed/unknown outcomes remain explicit and can be checked without a write. Pending receipt IDs, not message text, are retained in sessionStorage; durable records also omit prompts.
 
 Per-task IPC sessions share a project-filtered replay hub. Same-directory writes are serialized within the WebUI and active attached tasks block conflicting writes. This is not an atomic lock against every external desktop client. Actual task creation invokes the desktop's app-tool implementation (including its own attribution/creation policies); it is not keystroke automation.
+
+## v1.3 desktop and project feature bridge (2026-09-08)
+
+The opt-in desktop bridge attaches only to the already supplied loopback CDP endpoint. It selects the main app://-/index.html target, calls its existing electronBridge.sendMessageFromView, and observes only matching response IDs. It does not launch a browser/app-server, collect credentials, change policy, or retry mutations. Remote debug URLs and arbitrary RPC/host routes are rejected.
+
+Read methods: project/list, skills/list, plugin/installed, mcpServerStatus/list, account/rateLimits/read, thread/read, thread/list, thread/turns/list. Native projectless workspace paths come from the existing desktop host's projectless-workspace-root / projectless-thread-cwd, not from the browser.
+
+User operations: project/create (native idempotencyKey), thread/start (threadSource=user, explicit projectId or null), one turn/start with clientUserMessageId and structured skill/mention items; thread/name/set, thread/archive, thread/fork (ephemeral for side chat, deferGoalContinuation=true), review/start (inline only), thread/compact/start, thread/goal/set, feedback/upload (includeLogs=false, extraLogFiles=[]). Pinning uses the desktop's set-thread-pinned or the app-server pinned section. No model prompt is sent by rename, pin, archive, or fork.
+
+Existing desktop tasks without a view owner use thread/resume and bounded public notifications through a per-connection CDP binding. Only explicitly attached thread IDs and allowlisted public fields are forwarded; reasoning events and arbitrary tool arguments are excluded. The HTTP browser still receives coalesced SSE text deltas, not screenshots or raw desktop traffic. No endless refresh polling is used.
+
+Write-ahead creation receipts distinguish known creation, accepted first message, rejected first message and unknown outcomes. A timeout cannot replay create/turn-start on refresh or restart. User-visible action receipts also prevent duplicate mutation. Project roots are canonicalized and checked against private directories before a single explicit directory is created. Imported desktop directories do not acquire non-admin grants.
+
+Validation note: real desktop read/attach and browser read-only paths were exercised. Creation, turn-start, compression, review, archive, pin, feedback, fork and goal writes were mocked in grouped regression tests, not executed on the user's real account. Same-directory forks are implemented; worktree forks are not.

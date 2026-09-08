@@ -23,8 +23,9 @@
   </header>
   <div class="layout">
     <aside id="sidebar" class="sidebar">
-      <div class="section-title">项目 <span id="project-count" class="count">0</span></div>
+      <div class="section-title">项目 <span id="project-count" class="count">0</span><button id="new-project" class="icon" aria-label="新建项目" hidden>＋</button></div>
       <label class="sr-only" for="project-select">选择项目</label><select id="project-select"></select><p id="project-root" class="path"></p>
+      <button id="projectless" class="small wide" hidden>无项目对话</button>
       <button id="new-thread" class="new-task">＋ 新建任务</button>
       <div class="section-title task-heading">任务 <button id="refresh-threads" class="icon" aria-label="刷新任务">↻</button></div>
       <input id="thread-filter" class="search" placeholder="搜索任务" aria-label="搜索任务"><nav id="thread-list" aria-label="任务列表"></nav>
@@ -34,6 +35,7 @@
     <main class="main">
       <div class="task-header"><div><p id="breadcrumb" class="eyebrow"></p><h1 id="thread-title">新任务</h1></div><span id="task-status" class="badge">待命</span></div>
       <div id="notice" class="notice" role="status" hidden></div>
+      <section id="side-context" class="side-context" hidden><div class="panel-title"><h2>原聊天</h2><button id="return-main" type="button" class="small" hidden>返回原聊天</button></div><div id="side-history"></div></section>
       <div id="timeline" class="timeline" aria-label="任务输出" tabindex="0"><div id="empty" class="empty-state"><h2>新任务</h2><p>输入消息，或用 / 选择技能</p></div></div>
       <div id="approvals" class="approvals"></div>
       <form id="composer" class="composer">
@@ -42,7 +44,7 @@
           <input id="menu-query" class="menu-search" placeholder="搜索技能、插件或命令" aria-label="搜索技能、插件或命令" autocomplete="off">
           <div id="menu-list" role="listbox" aria-label="技能与命令列表"></div><p id="menu-status" class="footnote" role="status"></p>
         </section>
-        <p id="new-task-note" class="footnote" hidden>在当前项目目录新建；首条消息仅支持文本，权限沿用桌面设置。</p><div id="attachments" class="attachment-list"></div>
+        <p id="new-task-note" class="footnote" hidden>发送首条消息时创建聊天。</p><div id="attachments" class="attachment-list"></div>
         <label for="prompt" class="sr-only">发送给 Codex 的消息</label>
         <textarea id="prompt" placeholder="发送消息，输入 / 选择技能" rows="3" maxlength="64000" aria-controls="menu-list" aria-expanded="false"></textarea>
         <div class="composer-controls">
@@ -63,6 +65,8 @@
     </aside>
   </div>
 </div>
+<dialog id="project-dialog"><form id="project-form"><div class="dialog-header"><h2>新建项目</h2><button id="close-project" type="button" class="icon" aria-label="关闭新建项目">×</button></div><label>项目名称<input id="project-name" required maxlength="100" autocomplete="off"></label><label>服务器目录<input id="project-path" required maxlength="2048" placeholder="/home/user/projects/my-project"></label><label class="check"><input id="project-create-directory" type="checkbox">目录不存在时新建（父目录须存在）</label><p class="footnote">添加到当前 Codex。不会覆盖已有文件。</p><div class="dialog-actions"><button type="submit" class="primary">创建项目</button></div></form></dialog>
+<dialog id="task-action-dialog"><form id="task-action-form"><div class="dialog-header"><h2 id="task-action-title">聊天操作</h2><button id="close-task-action" type="button" class="icon" aria-label="取消聊天操作">×</button></div><p id="task-action-note" class="footnote"></p><label id="task-action-text-label">内容<textarea id="task-action-text" rows="3" maxlength="4000"></textarea></label><label id="review-target-label" hidden>审查范围<select id="review-target"><option value="uncommittedChanges">未提交的更改</option><option value="baseBranch">与分支比较</option></select></label><label id="review-branch-label" hidden>比较分支<input id="review-branch" maxlength="200" placeholder="main"></label><div class="dialog-actions"><button type="submit" class="primary" id="task-action-submit">确认</button></div></form></dialog>
 <dialog id="new-thread-dialog"><form id="new-thread-form"><div class="dialog-header"><h2>新建任务</h2><button id="cancel-new-thread" type="button" class="icon" aria-label="取消新建">×</button></div><label>标题<input id="new-thread-title" maxlength="120" autocomplete="off"></label><div class="dialog-actions"><button type="submit" class="primary">创建任务</button></div></form></dialog>
 <dialog id="info-dialog"><div class="dialog-header"><h2 id="info-title">详情</h2><button id="close-info" type="button" class="icon" aria-label="关闭详情">×</button></div><div id="info-content"></div></dialog>
 <dialog id="reference-dialog"><div class="dialog-header"><h2>项目文件与文件夹</h2><button id="close-references" type="button" class="icon" aria-label="关闭文件选择">×</button></div><div class="form-row"><button id="reference-up" type="button" class="small">上级目录</button><code id="reference-path">/</code><button id="reference-current" type="button" class="small">引用此文件夹</button></div><div id="reference-list"></div></dialog>

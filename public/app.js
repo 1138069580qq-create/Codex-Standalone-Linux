@@ -5,7 +5,7 @@ const S = { user:null, csrf:'', projects:[], models:[], project:null, thread:nul
   timer:null, hiddenTimer:null, renderTimer:null, nodes:new Map(), attachments:[], bytes:0, truncated:false,
   connected:false, newTask:false, taskCreation:null, creationTimer:null, checkingCreation:false, attachedThreadId:null, capabilities:{}, panel:'quota', filePath:'.', syncing:null, sending:false, attempt:null, creationId:null,
   selected:[], references:[], goalDraft:'', accessConfirmed:false, tokenUsage:null, threadSettings:null, settingsOverrides:{}, modelRequest:null, modelsUnavailable:false,
-  catalog:null, catalogProject:null, catalogRequest:null, menuMode:'plus', menuOpen:false, menuItems:[], menuIndex:0, referencePath:'.' };
+  catalog:null, catalogProject:null, catalogRequest:null, menuMode:'plus', menuOpen:false, menuItems:[], menuIndex:0, referencePath:'.', sideOrigin:null,actionAttempt:null };
 const bytes = n => n < 1024 ? `${n} B` : n < 1048576 ? `${(n/1024).toFixed(1)} KiB` : `${(n/1048576).toFixed(1)} MiB`;
 const date = v => v ? new Date(v < 1e12 ? v*1000 : v).toLocaleString('zh-CN', { hour12:false }) : '未知';
 const stateName = v => ({idle:'待命',running:'运行中',inProgress:'运行中',completed:'已完成',interrupted:'已停止',failed:'失败',notLoaded:'未加载',active:'运行中',systemError:'错误'})[v] || v;
@@ -36,8 +36,8 @@ const q = params => new URLSearchParams(params).toString();
 const apiProject = (route, extra={}) => `/api/codex/${route}?${q({projectId:S.project?.id||'',...extra})}`;
 function permission(name) { return !!S.project?.permissions?.[name]; }
 function closeStream() { clearTimeout(S.timer); S.timer=null; S.stream?.close(); S.stream=null; }
-function clearConversation() { clearTimeout(S.creationTimer);S.creationTimer=null;S.newTask=false;S.taskCreation=null;S.epoch++; closeStream(); clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='新任务'; S.selected=[]; S.references=[]; S.goalDraft=''; S.accessConfirmed=false; S.tokenUsage=null; S.threadSettings=null; S.settingsOverrides={}; $('access').value='default'; closeMenu(); $('prompt').value=''; renderAttachments(); controls(); }
-function loggedOut() { clearConversation(); S.user=null; S.csrf=''; S.connected=false; S.attachedThreadId=null; S.capabilities={}; S.projects=[]; S.threads=[]; S.project=null; S.models=[]; S.items.clear(); $('workspace').hidden=true; $('login-view').hidden=false; $('settings-dialog').close(); $('new-thread-dialog').close(); for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close(); $('password').value=''; S.catalog=null; }
+function clearConversation() { clearTimeout(S.creationTimer);S.creationTimer=null;S.newTask=false;S.newTaskConfirmed=false;S.modelRequest=null;S.modelsUnavailable=false;S.taskCreation=null;S.epoch++; closeStream(); if(!S.sideOrigin)$('side-context').hidden=true; clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='新任务'; S.selected=[]; S.references=[]; S.goalDraft=''; S.accessConfirmed=false; S.tokenUsage=null; S.threadSettings=null; S.settingsOverrides={}; $('access').value='default'; closeMenu(); $('prompt').value=''; renderAttachments(); controls(); }
+function loggedOut() { S.sideOrigin=null;$('side-context').hidden=true;$('side-history').replaceChildren();clearConversation(); S.user=null; S.csrf=''; S.connected=false; S.attachedThreadId=null; S.capabilities={}; S.projects=[]; S.threads=[]; S.project=null; S.models=[]; S.items.clear(); $('workspace').hidden=true; $('login-view').hidden=false; $('settings-dialog').close(); $('new-thread-dialog').close(); for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close(); $('password').value=''; S.catalog=null; }
 function supports(capability) {
   if(capability==='createThread' && S.attachedThreadId)return false;
   return S.capabilities?.[capability]!==false;
@@ -45,7 +45,8 @@ function supports(capability) {
 function canStartTask(){return supports('createThread') || S.capabilities?.createWithMessage===true&&S.project?.canCreateTask!==false;}
 function commandAvailable(command) {
   if(command.id==='new')return canStartTask();
-  if(S.newTask&&['upload','references','plan','code','permissions','goal'].includes(command.id))return false;
+  if(S.newTask&&(['upload','references','goal'].includes(command.id)||S.capabilities?.firstMessageExtensions!==true&&['plan','code','permissions'].includes(command.id)))return false;
+  if(['review','side','fork','compact','feedback','archive','pin','rename'].includes(command.id))return S.capabilities?.taskActions===true&&!!S.thread;
   const capability={new:'createThread',skills:'extensions',plugins:'extensions',mcp:'mcp',goal:'setGoal'}[command.id];
   return (!capability || supports(capability)) && (!command.files || permission('files'));
 }
@@ -57,16 +58,18 @@ function controls() {
   $('empty').querySelector('p').textContent=S.newTask?'输入首条消息后创建任务':supports('extensions')?'输入消息，或用 / 选择技能':'输入消息，或用 / 选择功能';
   $('prompt').disabled=!ready || S.sending;
   $('stop').hidden=S.status!=='running'; $('stop').disabled=!ready || !S.thread;
-  $('attach').disabled=!ready || S.sending || S.newTask;
-  $('access').disabled=!ready || S.sending || S.newTask;
-  for(const id of ['model','effort','mode'])$(id).disabled=!ready || S.sending || (id!=='mode'&&S.modelsUnavailable) || (id==='mode'&&S.newTask);
+  $('attach').disabled=!ready || S.sending || S.newTask&&S.capabilities?.firstMessageExtensions!==true;
+  $('access').disabled=!ready || S.sending || S.newTask&&S.capabilities?.firstMessageExtensions!==true;
+  for(const id of ['model','effort','mode'])$(id).disabled=!ready || S.sending || (id!=='mode'&&S.modelsUnavailable) || (id==='mode'&&S.newTask&&S.capabilities?.firstMessageExtensions!==true);
   $('access').querySelector('option[value=full]').disabled=!S.user?.admin;
   $('sidebar-plugins').disabled=!S.connected || !S.project || !supports('extensions');
-  $('sidebar-plugins').title=supports('extensions')?'':'此连接暂不支持，请在 Codex 桌面使用。';
+  $('sidebar-plugins').title=supports('extensions')?'':'技能接口未连接。';
   $('new-thread').hidden=!supports('createThread')&&S.capabilities?.createWithMessage!==true;
   $('new-thread').disabled=!S.connected || !permission('send') || S.sending || !canStartTask();
   $('refresh-quota').hidden=!supports('quota');
   $('refresh-quota').disabled=!S.connected || !supports('quota');
+  $('new-project').hidden=S.capabilities?.projects!==true;$('projectless').hidden=S.capabilities?.projectless!==true;$('new-project').disabled=S.sending;$('projectless').disabled=S.sending;
+  $('return-main').hidden=!S.sideOrigin;$('return-main').disabled=S.sending;
   $('project-select').disabled=S.sending; $('settings').disabled=S.sending;
   $('refresh-threads').disabled=!S.connected || !S.project;
   $('task-status').textContent=stateName(S.status); $('task-status').className=`badge${S.status==='running'?' running':''}`;
@@ -76,6 +79,7 @@ function controls() {
 }
 async function restoreAttachedThread(refresh=false) {
   if(!S.attachedThreadId||S.newTask)return false;
+  if(S.capabilities?.switchThreads===true&&!S.threads.some(t=>t.id===S.attachedThreadId)&&!S.thread)return false;
   if(S.thread&&S.capabilities?.switchThreads===true){if(refresh)await syncSnapshot();return true;}
   if(S.thread?.id===S.attachedThreadId){if(refresh)await syncSnapshot();return true;}
   const thread=S.threads.find(t=>t.id===S.attachedThreadId);
@@ -91,8 +95,8 @@ async function startNewConversation() {
   if(S.capabilities?.createWithMessage===true){
     if(!canStartTask())throw new Error('请先在桌面保存此项目。');
     const warning=S.taskCreation?'上次创建尚未确认，继续会新建另一个任务。\n':'';
-    if(!await confirmAction('在当前目录新建任务',warning+'目录：'+S.project.root+'\n不另建 worktree。发送首条消息时才创建，权限和执行模式使用桌面设置。'))return;
-    clearConversation();forgetCreation();forgetSelectedTask();S.newTask=true;S.settingsOverrides={};
+    if(!await confirmAction(S.project.kind==='projectless'?'新建无项目对话':'在当前项目新建聊天',warning+(S.project.kind==='projectless'?'使用独立聊天目录，不关联项目。':'目录：'+S.project.root+'\n不另建 worktree。')+'\n发送首条消息时才创建。'))return;
+    clearConversation();forgetCreation();forgetSelectedTask();S.newTask=true;S.newTaskConfirmed=true;S.settingsOverrides={};
     const option=el('option','桌面默认模型');option.value='';$('model').prepend(option);$('model').value='';loadEfforts('');
     $('mode').value='code';if(!$('access').querySelector('option[value=desktop-default]')){const option=el('option','桌面设置');option.value='desktop-default';option.disabled=true;$('access').append(option);}$('access').value='desktop-default';renderSettingsSource();renderThreads();controls();notice();
   }else if(S.attachedThreadId){await restoreAttachedThread(true);notice('已连接桌面当前任务。');}
@@ -104,7 +108,8 @@ function rememberSelectedTask(){if(!S.capabilities?.switchThreads||!S.thread)ret
 function forgetSelectedTask(){try{sessionStorage.removeItem(selectedTaskStorageKey());}catch{}}
 async function restoreSelectedTask(){
   if(!S.capabilities?.switchThreads)return;let saved;try{saved=JSON.parse(sessionStorage.getItem(selectedTaskStorageKey())||'null');}catch{return;}
-  if(saved?.projectId!==S.project?.id||!saved?.threadId)return;
+  if(!saved?.threadId||!S.projects.some(p=>p.id===saved.projectId))return;
+  if(saved.projectId!==S.project?.id)await chooseProject(saved.projectId);
   const thread=S.threads.find(t=>t.id===saved.threadId);if(thread)await selectThread(thread);
 }
 function creationStorageKey(){return 'codex-webui-creation:'+S.user?.id;}
@@ -113,7 +118,7 @@ function forgetCreation(){try{sessionStorage.removeItem(creationStorageKey());}c
 async function applyCreationResult(result,epoch){
   if(epoch!==S.epoch)return;
   S.taskCreation=result;rememberCreation(result);
-  if(result.messageAccepted===true)$('prompt').value='';
+  if(result.messageAccepted===true){$('prompt').value='';S.selected=[];renderAttachments();}
   if(result.thread){
     if(S.thread?.id!==result.thread.id){S.epoch++;closeStream();S.syncing=null;}
     S.newTask=false;S.thread=result.thread;S.status=result.thread.status;S.settingsOverrides={};S.attempt=null;
@@ -143,9 +148,10 @@ async function resumeCreation(){
   if(S.taskCreation)scheduleCreationCheck(S.epoch,saved.requestId);
 }
 async function sendNewDesktopTask(){
+  if(!S.newTaskConfirmed){if(!await confirmAction('创建聊天',S.project.kind==='projectless'?'使用独立目录，不关联项目。':'工作目录：'+S.project.root))return;S.newTaskConfirmed=true;}
   if(S.taskCreation){await checkCreation();return;}
   const epoch=S.epoch,requestId=CodexState.requestId();
-  const body={requestId,projectId:S.project.id,text:$('prompt').value,environment:'local',confirmCurrentDirectory:true,model:$('model').value,effort:$('effort').value,settingsOverrides:Object.keys(S.settingsOverrides||{}),attachments:[],extensions:[],references:[]};
+  const body={requestId,projectId:S.project.id,text:$('prompt').value,environment:'local',confirmCurrentDirectory:true,model:$('model').value,effort:$('effort').value,mode:$('mode').value,access:$('access').value,confirmFullAccess:S.accessConfirmed,settingsOverrides:Object.keys(S.settingsOverrides||{}),attachments:[],extensions:S.selected.map(e=>e.id),references:[]};
   S.taskCreation={requestId,projectId:S.project.id,status:'submitting'};rememberCreation(S.taskCreation);notice('桌面正在创建任务…');
   let responseReceived=false;
   try{const result=await api('/api/codex/task-creations',body);responseReceived=true;await applyCreationResult(result,epoch);if(S.taskCreation?.requestId===requestId)scheduleCreationCheck(S.epoch,requestId);}
@@ -157,10 +163,10 @@ async function sendNewDesktopTask(){
 async function signedIn(data) { S.user=data.user; S.csrf=data.csrf; $('login-view').hidden=true; $('workspace').hidden=false; $('password').value=''; $('user-name').textContent=S.user.username; await refreshContext();await restoreSelectedTask(); await resumeCreation(); }
 async function refreshContext() {
   const [status, projects]=await Promise.all([api('/api/codex/status'),api('/api/codex/projects')]);
-  S.connected=status.connected; S.attachedThreadId=status.attachedThreadId||null; S.capabilities=status.capabilities||{}; S.projects=projects; $('project-count').textContent=String(projects.length);
+  S.connected=status.connected; S.attachedThreadId=status.attachedThreadId||null; S.capabilities=status.capabilities||{}; S.projects=projects; $('project-count').textContent=String(projects.filter(p=>p.kind!=='projectless').length);
   $('project-select').replaceChildren();
   if(!projects.length) $('project-select').append(el('option','尚未分配项目'));
-  for(const project of projects) { const option=el('option',project.name); option.value=project.id; $('project-select').append(option); }
+  for(const project of projects) { const option=el('option',project.kind==='projectless'?'无项目对话':project.name); option.value=project.id; $('project-select').append(option); }
   const selected=projects.find(p=>p.id===S.project?.id)||projects[0];
   if(!selected || selected.id!==S.project?.id) await chooseProject(selected?.id); else { S.project=selected; $('project-select').value=selected.id; if(S.connected) await loadThreads(); }
   if(S.attachedThreadId)await restoreAttachedThread();
@@ -172,11 +178,11 @@ async function refreshContext() {
   }
 }
 async function chooseProject(id) {
-  clearConversation(); S.project=S.projects.find(p=>p.id===id)||null; S.threads=[]; S.next=null; S.filePath='.'; S.catalog=null; S.catalogProject=null; S.catalogRequest=null;
+  clearConversation(); S.sideOrigin=null;S.project=S.projects.find(p=>p.id===id)||null; S.threads=[]; S.next=null; S.filePath='.'; S.catalog=null; S.catalogProject=null; S.catalogRequest=null;
   if(S.project) $('project-select').value=S.project.id;
-  $('project-root').textContent=S.project?.root||''; $('breadcrumb').textContent=S.project?.name||'';
+  $('side-context').hidden=true;$('project-root').textContent=S.project?.kind==='projectless'?'不关联项目':S.project?.root||''; $('breadcrumb').textContent=S.project?.name||'';
   $('thread-filter').value=''; $('file-list').replaceChildren(); $('diff-content').textContent='点击刷新'; renderThreads(); controls();
-  if(S.connected && S.project) await loadThreads();
+  if(S.connected && S.project){await loadThreads();if(S.capabilities?.createWithMessage===true&&!S.threads.some(t=>t.id===S.attachedThreadId)){S.newTask=true;S.settingsOverrides={};$('model').value='';$('mode').value='code';}await loadModels();controls();}
 }
 async function loadThreads(more=false) {
   if(!S.project || !S.connected) return;
@@ -188,9 +194,9 @@ async function loadThreads(more=false) {
 }
 function renderThreads() {
   const filter=$('thread-filter').value.toLowerCase(); $('thread-list').replaceChildren();
-  for(const thread of S.threads.filter(t=>t.title.toLowerCase().includes(filter))) {
+  for(const thread of [...S.threads].sort((a,b)=>Number(!!b.pinned)-Number(!!a.pinned)).filter(t=>t.title.toLowerCase().includes(filter))) {
     const button=el('button',undefined,`task-link${S.thread?.id===thread.id?' active':''}`);
-    button.append(el('strong',thread.title),el('span',`${stateName(thread.status)}${thread.updatedAt?' · '+date(thread.updatedAt):''}`));
+    button.append(el('strong',(thread.pinned?'↑ ':'')+thread.title),el('span',`${stateName(thread.status)}${thread.updatedAt?' · '+date(thread.updatedAt):''}`));
     button.onclick=action(()=>selectThread(thread)); $('thread-list').append(button);
   }
   if(!S.threads.length) $('thread-list').append(el('p',S.connected?'暂无任务':'未连接','footnote'));
@@ -200,7 +206,7 @@ async function selectThread(thread) {
   if(S.sending) throw new Error('消息正在提交，请稍后切换。');
   if(S.thread?.id===thread.id){await syncSnapshot();return;}
   if(S.attachedThreadId&&S.capabilities?.switchThreads!==true){if(thread.id!==S.attachedThreadId)throw new Error('此连接仅支持桌面当前任务。');await restoreAttachedThread(true);return;}
-  clearConversation(); S.thread=thread; $('thread-title').textContent=thread.title; $('sidebar').classList.remove('mobile-open'); renderThreads(); await syncSnapshot();rememberSelectedTask();
+  clearConversation(); S.sideOrigin=null;$('side-context').hidden=true;S.thread=thread; $('thread-title').textContent=thread.title; $('sidebar').classList.remove('mobile-open'); renderThreads(); await syncSnapshot();await loadModels();rememberSelectedTask();
 }
 async function syncSnapshot() {
   if(!S.thread || !S.project) return;
@@ -345,7 +351,7 @@ async function sendMessage(){
     if(S.newTask){await sendNewDesktopTask();return;}
     if(S.taskCreation)throw new Error('请先检查首条消息的创建状态。');
     const content={text:$('prompt').value,projectId:S.project.id,model:$('model').value,effort:$('effort').value,mode:$('mode').value,attachments:[...S.attachments],extensions:S.selected.map(e=>e.id),references:[...S.references],access:$('access').value,confirmFullAccess:S.accessConfirmed,...(S.attachedThreadId?{settingsOverrides:Object.keys(S.settingsOverrides||{})}:{})};
-    if(S.attachedThreadId && !await restoreAttachedThread())return;
+    if(S.attachedThreadId && !await restoreAttachedThread()){if(S.capabilities?.createWithMessage===true&&!S.thread){S.sending=false;await startNewConversation();notice('输入首条消息后创建聊天。');}return;}
     if(S.status==='running')throw new Error('任务仍在运行，请等待本轮结束。');
     // Only regular app-server mode may create a task on first send.
     if(!S.thread){
@@ -391,7 +397,7 @@ async function uploadFile(){
   }finally{$('upload').value='';}
 }
 let quotaLoading=null;
-async function loadQuota(){if(!supports('quota')){$('quota-content').textContent='请在 Codex 桌面查看额度和重置卡。';return;}if(!S.connected)return;if(quotaLoading)return quotaLoading;quotaLoading=(async()=>{try{const limits=await api('/api/codex/account/limits');renderQuota(limits);}catch(error){$('quota-content').textContent='暂时无法读取额度';throw error;}})();try{await quotaLoading;}finally{quotaLoading=null;} }
+async function loadQuota(){if(!supports('quota')){$('quota-content').textContent='请在 Codex 桌面查看额度和重置卡。';return;}if(!S.connected)return;if(quotaLoading)return quotaLoading;quotaLoading=(async()=>{try{const limits=await api('/api/codex/account/limits');renderQuota(limits);}catch(error){$('quota-content').textContent='Codex 未能返回额度数据';if(error.code!=='DESKTOP_BRIDGE_REJECTED')throw error;}})();try{await quotaLoading;}finally{quotaLoading=null;} }
 function renderQuota(limits){
   const container=$('quota-content');container.replaceChildren();
   const windows=limits.windows.filter(w=>!w.bucketId||w.bucketId==='codex');
@@ -412,7 +418,7 @@ function renderQuota(limits){
   for(const credit of cards){
     const card=el('div',undefined,'credit');
     card.append(el('p',credit.expiresAt===null?'不过期':credit.expiresAt?shortDate(credit.expiresAt)+' 到期':'未提供到期日'));
-    const button=el('button','使用重置卡','small');button.disabled=!S.user?.admin;
+    const button=el('button','使用重置卡','small');button.disabled=!S.user?.admin||!supports('resetQuota');
     let requestId=null;
     button.onclick=action(async()=>{
       if(!await confirmAction('使用重置卡','确认消耗一张重置卡？此操作不可撤销。'))return;
@@ -453,13 +459,21 @@ $('refresh-quota').onclick=action(loadQuota);$('refresh-files').onclick=action(l
 $('menu-toggle').onclick=()=>$('sidebar').classList.toggle('mobile-open');$('inspect-toggle').onclick=()=>$('inspector').classList.toggle('inspect-open');$('close-inspector').onclick=()=>$('inspector').classList.remove('inspect-open');
 document.addEventListener('visibilitychange',()=>{clearTimeout(S.hiddenTimer);if(document.hidden)S.hiddenTimer=setTimeout(()=>{closeStream();$('stream-state').textContent='已暂停';},15000);else if(!S.stream&&S.thread&&S.connected)openStream();});
 window.addEventListener('pagehide',closeStream);
-window.addEventListener('focus',()=>{if(S.connected&&S.attachedThreadId)loadModels().catch(e=>notice(e.message));});
+window.addEventListener('focus',()=>{if(S.connected&&S.attachedThreadId){loadModels().catch(e=>notice(e.message));refreshProjectChoices().catch(()=>{});}});
 api('/api/session').then(signedIn).catch(error=>{if(error.status!==401)toast(error.message,true);});
 
 const commands=[
   {id:'upload',label:'上传文件',description:'从本机添加附件',command:'/upload',files:true},
   {id:'references',label:'项目文件和文件夹',description:'引用当前项目中的路径',command:'/files',files:true},
-  {id:'new',label:'新建任务',description:'开始新的对话',command:'/new'},
+  {id:'review',label:'代码审查',description:'审查更改或比较分支',command:'/review'},
+  {id:'side',label:'侧边',description:'临时侧边聊天',command:'/side'},
+  {id:'fork',label:'创建聊天分支',description:'保留当前上下文',command:'/fork'},
+  {id:'compact',label:'压缩',description:'压缩聊天上下文',command:'/compact'},
+  {id:'feedback',label:'反馈',description:'发送聊天反馈',command:'/feedback'},
+  {id:'archive',label:'归档',description:'归档当前聊天',command:'/archive'},
+  {id:'new',label:'新聊天',description:'开始空白聊天',command:'/new'},
+  {id:'pin',label:'置顶聊天',description:'保留在列表顶部',command:'/pin'},
+  {id:'rename',label:'重命名',description:'修改聊天标题',command:'/rename'},
   {id:'plan',label:'计划模式',description:'先制定计划',command:'/plan'},
   {id:'code',label:'执行模式',description:'执行任务',command:'/code'},
   {id:'model',label:'模型',description:'选择模型与推理强度',command:'/model'},
@@ -474,7 +488,7 @@ const commands=[
 ];
 async function loadCatalog(refresh=false){
   if(!S.project || !S.connected)return null;
-  if(!supports('extensions')){S.catalogProject=S.project.id;return S.catalog={entries:[],skillsAvailable:false,pluginsAvailable:false,issues:['技能与插件：请在桌面使用']};}
+  if(!supports('extensions')){S.catalogProject=S.project.id;return S.catalog={entries:[],skillsAvailable:false,pluginsAvailable:false,issues:['技能接口未连接']};}
   const projectId=S.project.id;
   if(!refresh && S.catalog && S.catalogProject===projectId)return S.catalog;
   if(!refresh && S.catalogRequest?.projectId===projectId)return S.catalogRequest.promise;
@@ -484,7 +498,7 @@ async function loadCatalog(refresh=false){
 }
 async function openMenu(mode='plus',refresh=false){
   if(!S.project || !S.connected)return;
-  if((mode==='skills'||mode==='plugins')&&!supports('extensions')){toast('此连接暂不支持，请在 Codex 桌面使用。');return;}
+  if((mode==='skills'||mode==='plugins')&&!supports('extensions')){toast('技能接口尚未连接，请刷新连接。');return;}
   const changing=!S.menuOpen || S.menuMode!==mode;
   S.menuMode=mode;S.menuOpen=true;
   if(changing){S.menuIndex=0;$('menu-query').value='';}
@@ -501,8 +515,8 @@ function renderMenu(){
   if(!S.menuOpen)return;
   const query=(S.menuMode==='slash'?$('prompt').value.replace(/^\//,''):$('menu-query').value).trim().toLowerCase();
   const entries=(supports('extensions')&&S.catalogProject===S.project?.id?S.catalog?.entries:[])||[];
-  const common=S.menuMode==='plus'?['upload','references','goal','plan']:['new','plan','permissions','mcp','status','goal'];
-  const basic=['plus','slash'].includes(S.menuMode)?commands.filter(c=>(query||common.includes(c.id))&&commandAvailable(c)).map(c=>({...c,kind:'command',enabled:c.id!=='stop'||S.status==='running'})):[];
+  const common=S.menuMode==='plus'?['upload','references','goal','plan']:['mcp','review','side','fork','compact','feedback','archive','new','status','goal','pin','plan','rename','permissions'];
+  const basic=['plus','slash'].includes(S.menuMode)?commands.filter(c=>(query||common.includes(c.id))&&commandAvailable(c)).map(c=>({...c,kind:'command',enabled:c.id==='stop'?S.status==='running':!(['review','compact','fork','side','archive'].includes(c.id)&&S.status==='running')})):[];
   const filtered=entries.filter(e=>S.menuMode!=='skills'&&S.menuMode!=='plugins'||e.kind===(S.menuMode==='skills'?'skill':'plugin'));
   const ordered=S.menuMode==='plus'?[...filtered.filter(e=>e.kind==='plugin'),...filtered.filter(e=>e.kind==='skill')]:filtered;
   const all=[...basic,...ordered];
@@ -533,6 +547,7 @@ async function chooseMenu(index){
     renderAttachments();$('prompt').focus();return;
   }
   switch(item.id){
+    case 'review':case 'side':case 'fork':case 'compact':case 'feedback':case 'archive':case 'pin':case 'rename':await openTaskAction(item.id);break;
     case 'upload':$('upload').click();break;
     case 'references':await openReferences();break;
     case 'new':await startNewConversation();break;
@@ -579,9 +594,10 @@ function showInfo(title){$('info-title').textContent=title;$('info-content').rep
 async function showMcp(){const root=showInfo('MCP');root.append(el('p','读取中…','muted'));try{const result=await api(apiProject('mcp',S.thread?{threadId:S.thread.id}:{}));root.replaceChildren();if(!result.data.length)root.append(el('p','未配置 MCP 服务器','muted'));for(const server of result.data){const card=el('section',undefined,'info-row');card.append(el('strong',server.name),el('p',`${server.runtimeStatus||'状态未知'} · ${server.authStatus||'认证状态未知'} · ${server.tools.length} 个工具`,'footnote'));if(server.tools.length){const details=el('details');details.append(el('summary','工具'),el('pre',server.tools.join('\n')));card.append(details);}root.append(card);}if(result.more)root.append(el('p','仅显示前 100 项','footnote'));}catch(error){root.textContent=error.message;}}
 async function showStatus(){
   if(S.thread)await syncSnapshot();const root=showInfo('状态');
-  const rows=[['项目',S.project?.name||'未选择'],['任务 ID',S.thread?.id||'尚未创建'],['状态',stateName(S.status)],['模型',$('model').value],['权限',$('access').selectedOptions[0].textContent]];
+  const rows=[['类型',S.project?.kind==='projectless'?'无项目对话':'项目对话'],['项目',S.project?.name||'未选择'],['任务 ID',S.thread?.id||'尚未创建'],['状态',stateName(S.status)],['模型',$('model').value],['权限',$('access').selectedOptions[0].textContent]];
   const usage=S.tokenUsage;if(usage){rows.push(['累计 tokens',String(usage.total)],['最近一轮 tokens',String(usage.last)]);if(usage.contextWindow)rows.push(['上下文窗口',String(usage.contextWindow)]);}else rows.push(['上下文用量','尚未收到 Codex 用量数据']);
   for(const [label,value] of rows){const row=el('div',undefined,'status-row');row.append(el('span',label,'muted'),el('code',value));root.append(row);}
+  try{const limits=await api('/api/codex/account/limits');for(const w of limits.windows||[]){const row=el('div',undefined,'status-row');row.append(el('span',w.windowDurationMins===10080?'一周窗口':w.name||'额度窗口','muted'),el('code',w.usedPercent+'% · '+date(w.resetsAt)+' 重置'));root.append(row);}}catch{root.append(el('p','Codex 未提供当前额度数据','footnote'));}
 }
 async function openGoal(){
   $('goal-objective').value=S.goalDraft;
@@ -602,6 +618,62 @@ $('access').onchange=action(selectAccess);$('cancel-confirm').onclick=()=>finish
 $('confirm-form').onsubmit=event=>{event.preventDefault();finishConfirm(true);};$('confirm-dialog').addEventListener('cancel',()=>finishConfirm(false));
 $('confirm-dialog').addEventListener('close',()=>{if(confirmResolve)finishConfirm(false);});
 $('close-info').onclick=()=>$('info-dialog').close();$('close-goal').onclick=()=>$('goal-dialog').close();
-$('goal-form').onsubmit=action(async()=>{const objective=$('goal-objective').value.trim();if(S.thread){await api(`/api/codex/threads/${encodeURIComponent(S.thread.id)}/goal`,{projectId:S.project.id,objective},'PUT');}else S.goalDraft=objective;renderAttachments();$('goal-dialog').close();$('prompt').focus();});
+$('goal-form').onsubmit=action(async()=>{const objective=$('goal-objective').value.trim();if(!await confirmAction('设置持续目标','Codex 将继续追求该目标，可能消耗模型额度。'))return;if(S.thread){await api(`/api/codex/threads/${encodeURIComponent(S.thread.id)}/goal`,{projectId:S.project.id,objective},'PUT');}else S.goalDraft=objective;renderAttachments();$('goal-dialog').close();$('prompt').focus();});
 $('close-references').onclick=()=>$('reference-dialog').close();$('reference-up').onclick=action(async()=>{S.referencePath=S.referencePath.includes('/')?S.referencePath.slice(0,S.referencePath.lastIndexOf('/')):'.';await renderReferences();});$('reference-current').onclick=action(()=>addReference(S.referencePath));
 document.addEventListener('pointerdown',event=>{if(S.menuOpen&&!$('composer-menu').contains(event.target)&&event.target!==$('prompt')&&!$('attach').contains(event.target))closeMenu();});
+// User-initiated project and chat operations. No action runs just by opening its menu.
+let projectAttempt=null;
+$('new-project').onclick=()=>{projectAttempt=null;$('project-name').value='';$('project-path').value='';$('project-create-directory').checked=false;$('project-dialog').showModal();$('project-name').focus();};
+$('close-project').onclick=()=>$('project-dialog').close();
+$('project-form').onsubmit=action(async()=>{
+  const body={name:$('project-name').value.trim(),root:$('project-path').value.trim(),createDirectory:$('project-create-directory').checked,confirmDirectory:true};
+  if(!await confirmAction('创建项目',`添加到 Codex：${body.name}\n目录：${body.root}${body.createDirectory?'\n目录不存在时创建':''}`))return;
+  const fingerprint=JSON.stringify(body);if(projectAttempt?.fingerprint!==fingerprint)projectAttempt={fingerprint,requestId:CodexState.requestId()};
+  const result=await api('/api/codex/projects',{...body,requestId:projectAttempt.requestId});
+  $('project-dialog').close();projectAttempt=null;await refreshContext();await chooseProject(result.id);await startNewConversation();
+});
+$('projectless').onclick=action(async()=>{
+  if(S.sending)return;if($('prompt').value.trim()&&!await confirmAction('切换到无项目对话','当前未发送的草稿将清空。'))return;
+  await chooseProject('projectless');await startNewConversation();
+});
+async function openTaskAction(kind){
+  if(!S.thread||S.sending)return;
+  const labels={review:'代码审查',side:'侧边聊天',fork:'创建聊天分支',compact:'压缩上下文',feedback:'发送反馈',archive:'归档聊天',pin:S.thread.pinned?'取消置顶':'置顶聊天',rename:'重命名'};
+  const notes={review:'启动一次真实 Codex 审查，会消耗模型额度。',side:'保留当前上下文，打开临时聊天；不会自动发送消息。',fork:'在当前目录创建分支；不会自动发送消息。',compact:'由 Codex 压缩当前聊天上下文，可能消耗模型额度。',feedback:'将反馈文字和聊天 ID 发送给 Codex 反馈服务。不附加日志。',archive:'从活动列表移出，可在 Codex 桌面恢复。',pin:'同步到 Codex 的置顶列表。',rename:''};
+  S.actionAttempt={kind,threadId:S.thread.id,projectId:S.project.id,requestId:CodexState.requestId(),fingerprint:null};
+  $('task-action-title').textContent=labels[kind];$('task-action-note').textContent=notes[kind];
+  $('task-action-text-label').hidden=!['rename','feedback'].includes(kind);$('task-action-text').value=kind==='rename'?S.thread.title:'';
+  $('task-action-text').maxLength=kind==='rename'?120:4000;$('task-action-text').required=['rename','feedback'].includes(kind);
+  $('review-target-label').hidden=kind!=='review';$('review-target').value='uncommittedChanges';$('review-branch-label').hidden=true;$('review-branch').value='';
+  $('task-action-submit').textContent=kind==='review'?'开始审查':kind==='feedback'?'发送反馈':'确认';$('task-action-dialog').showModal();
+}
+$('close-task-action').onclick=()=>$('task-action-dialog').close();
+$('review-target').onchange=()=>{$('review-branch-label').hidden=$('review-target').value!=='baseBranch';};
+$('task-action-form').onsubmit=action(async()=>{
+  const attempt=S.actionAttempt;if(!attempt||attempt.threadId!==S.thread?.id||attempt.projectId!==S.project?.id)throw new Error('当前聊天已改变，请重新选择操作。');
+  const kind=attempt.kind,body={projectId:attempt.projectId,confirmed:true};
+  if(kind==='rename')body.name=$('task-action-text').value.trim();
+  if(kind==='feedback')body.reason=$('task-action-text').value.trim();
+  if(kind==='pin')body.pinned=!S.thread.pinned;
+  if(kind==='review'){body.target=$('review-target').value;body.branch=$('review-branch').value.trim();}
+  if(kind==='fork')body.environment='same-directory';
+  const fingerprint=JSON.stringify(body);if(attempt.fingerprint&&attempt.fingerprint!==fingerprint)throw new Error('请求已提交过。请检查桌面结果后重新打开操作。');attempt.fingerprint=fingerprint;
+  const origin=kind==='side'?{thread:{...S.thread},projectId:S.project.id,items:[...S.items.values()].filter(i=>['userMessage','agentMessage'].includes(i.type)).slice(-12)}:null;
+  const result=await api(`/api/codex/threads/${encodeURIComponent(attempt.threadId)}/actions/${kind}`,{...body,requestId:attempt.requestId});
+  $('task-action-dialog').close();S.actionAttempt=null;
+  if(result.thread){S.threads.unshift(result.thread);await selectThread(result.thread);if(origin){S.sideOrigin=origin;$('side-context').hidden=false;$('side-history').replaceChildren();for(const item of origin.items){const node=el('article',undefined,'side-item');node.append(el('strong',item.type==='userMessage'?'你':'Codex'),el('p',(item.text||'').slice(-2000)));$('side-history').append(node);}controls();$('thread-title').textContent='侧边 · '+result.thread.title;}return;}
+  if(kind==='archive'){clearConversation();await loadThreads();notice('已归档');}
+  else if(kind==='rename'){S.thread.title=body.name;$('thread-title').textContent=body.name;await loadThreads();}
+  else if(kind==='pin'){S.thread.pinned=result.pinned;const item=S.threads.find(t=>t.id===S.thread.id);if(item)item.pinned=result.pinned;renderThreads();}
+  else if(kind==='feedback')toast('反馈已发送');
+  else await syncSnapshot();
+});
+$('return-main').onclick=action(async()=>{if(!S.sideOrigin)return;if(S.status==='running')throw new Error('侧边聊天正在运行，请等待完成或停止。');const origin=S.sideOrigin;S.sideOrigin=null;$('side-context').hidden=true;await selectThread(origin.thread);controls();});
+let projectChoicesAt=0;
+async function refreshProjectChoices(){
+  if(S.capabilities?.projects!==true||Date.now()-projectChoicesAt<10000)return;projectChoicesAt=Date.now();
+  const projects=await api('/api/codex/projects');if(!S.user)return;S.projects=projects;
+  $('project-count').textContent=String(projects.filter(p=>p.kind!=='projectless').length);$('project-select').replaceChildren();
+  for(const project of projects){const option=el('option',project.name);option.value=project.id;$('project-select').append(option);}
+  if(S.project){const selected=projects.find(p=>p.id===S.project.id);if(selected)S.project=selected;$('project-select').value=S.project.id;}
+}

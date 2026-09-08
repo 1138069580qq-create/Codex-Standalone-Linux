@@ -7,3 +7,6 @@
 - Real integration tests are opt-in and must be distinguished from protocol mocks and skipped checks.
 - Do not recursively or bulk-delete files or directories. Retain test temporary directories for inspection.
 - If an i18n directory is introduced, every new translation key must be added to all language files.
+
+- User testing preference: minimize the number of tests performed. Do not expand or rerun tests for every small edit. Use only a few necessary checks in one final batch, and stop testing when the user asks. Existing results should be reused rather than re-run.
+- Do not use subagents for this project unless the user explicitly reverses that restriction. Do not submit real model messages or create real desktop tasks just for testing without a fresh explicit request.
