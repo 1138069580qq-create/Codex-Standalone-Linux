@@ -622,16 +622,32 @@ $('goal-form').onsubmit=action(async()=>{const objective=$('goal-objective').val
 $('close-references').onclick=()=>$('reference-dialog').close();$('reference-up').onclick=action(async()=>{S.referencePath=S.referencePath.includes('/')?S.referencePath.slice(0,S.referencePath.lastIndexOf('/')):'.';await renderReferences();});$('reference-current').onclick=action(()=>addReference(S.referencePath));
 document.addEventListener('pointerdown',event=>{if(S.menuOpen&&!$('composer-menu').contains(event.target)&&event.target!==$('prompt')&&!$('attach').contains(event.target))closeMenu();});
 // User-initiated project and chat operations. No action runs just by opening its menu.
-let projectAttempt=null;
-$('new-project').onclick=()=>{projectAttempt=null;$('project-name').value='';$('project-path').value='';$('project-create-directory').checked=false;$('project-dialog').showModal();$('project-name').focus();};
+let projectAttempt=null,projectCreating=false;
+$('new-project').onclick=()=>{if(projectCreating)return;projectAttempt=null;$('project-error').hidden=true;$('project-error').textContent='';$('project-name').value='';$('project-path').value='';$('project-create-directory').checked=false;$('project-dialog').showModal();$('project-name').focus();};
 $('close-project').onclick=()=>$('project-dialog').close();
-$('project-form').onsubmit=action(async()=>{
-  const body={name:$('project-name').value.trim(),root:$('project-path').value.trim(),createDirectory:$('project-create-directory').checked,confirmDirectory:true};
-  if(!await confirmAction('创建项目',`添加到 Codex：${body.name}\n目录：${body.root}${body.createDirectory?'\n目录不存在时创建':''}`))return;
-  const fingerprint=JSON.stringify(body);if(projectAttempt?.fingerprint!==fingerprint)projectAttempt={fingerprint,requestId:CodexState.requestId()};
-  const result=await api('/api/codex/projects',{...body,requestId:projectAttempt.requestId});
-  $('project-dialog').close();projectAttempt=null;await refreshContext();await chooseProject(result.id);await startNewConversation();
-});
+async function createProjectFromForm(){
+  if(projectCreating)return;
+  const epoch=S.epoch,body={name:$('project-name').value.trim(),root:$('project-path').value.trim(),createDirectory:$('project-create-directory').checked,confirmDirectory:true};
+  const fields=Array.from($('project-form').elements),disabled=fields.map(field=>field.disabled);
+  projectCreating=true;fields.forEach(field=>field.disabled=true);$('project-submit').textContent='创建中…';$('project-error').hidden=true;$('project-error').textContent='';
+  try {
+    // Submitting this form confirms the directory; no nested confirmation dialog.
+    const fingerprint=JSON.stringify(body);
+    if(projectAttempt?.fingerprint!==fingerprint)projectAttempt={fingerprint,requestId:CodexState.requestId()};
+    const result=await api('/api/codex/projects',{...body,requestId:projectAttempt.requestId});
+    if(epoch!==S.epoch)return;
+    $('project-dialog').close();projectAttempt=null;
+    await refreshContext();await chooseProject(result.id);await startNewConversation();
+  }catch(error){
+    if(epoch===S.epoch){
+      $('project-error').textContent=error.message;$('project-error').hidden=false;
+      if(!$('project-dialog').open)notice('项目操作失败：'+error.message);
+    }
+  }finally{
+    projectCreating=false;fields.forEach((field,index)=>field.disabled=disabled[index]);$('project-submit').textContent='创建项目';
+  }
+}
+$('project-form').onsubmit=action(createProjectFromForm);
 $('projectless').onclick=action(async()=>{
   if(S.sending)return;if($('prompt').value.trim()&&!await confirmAction('切换到无项目对话','当前未发送的草稿将清空。'))return;
   await chooseProject('projectless');await startNewConversation();

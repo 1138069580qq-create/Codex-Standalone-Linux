@@ -67,3 +67,25 @@ test("does not retry an unconfirmed command after a receipt-store reload", async
   );
   assert.equal(retriedSubmission, 0);
 });
+
+
+test('preflight failures release the request id durably, but dispatched failures never replay', async () => {
+  const file=await receiptFile('dispatch-boundary'),key='user:thread:boundary-123';
+  const receipts=new CommandReceipts(file);let calls=0;
+  await assert.rejects(receipts.run(key,async()=>{calls++;throw new ConsoleError(409,'PROJECT_BUSY','busy');},{trackSubmission:true}),/busy/);
+  assert.deepEqual(JSON.parse(await readFile(file,'utf8')),[]);
+  const reloaded=new CommandReceipts(file);await reloaded.load();
+  await assert.rejects(reloaded.run(key,async mark=>{calls++;mark();throw new Error('connection lost');},{trackSubmission:true}),/connection lost/);
+  const afterDispatch=new CommandReceipts(file);await afterDispatch.load();
+  await assert.rejects(afterDispatch.run(key,async()=>{calls++;return {};},{trackSubmission:true}),(e:unknown)=>e instanceof ConsoleError&&e.code==='OUTCOME_UNKNOWN');
+  assert.equal(calls,2);
+});
+test('simultaneous identical requests execute once and return the confirmed result on later retry', async()=>{
+  const receipts=new CommandReceipts(await receiptFile('concurrent'));let release!:()=>void,calls=0;
+  const hold=new Promise<void>(resolve=>release=resolve);
+  const first=receipts.run('concurrent-123',async mark=>{calls++;await hold;mark();return {turnId:'confirmed'};},{trackSubmission:true});
+  await assert.rejects(receipts.run('concurrent-123',async()=>{calls++;return {};},{trackSubmission:true}),(e:unknown)=>e instanceof ConsoleError&&e.code==='OUTCOME_UNKNOWN');
+  release();assert.deepEqual(await first,{turnId:'confirmed'});
+  assert.deepEqual(await receipts.run('concurrent-123',async()=>{calls++;return {};},{trackSubmission:true}),{turnId:'confirmed'});
+  assert.equal(calls,1);
+});

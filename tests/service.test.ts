@@ -357,3 +357,29 @@ test("forged full access and cross-project extension requests cannot start a tur
   await assert.rejects(service.send(identity,'alpha','thread-alpha',{text:'Hello',requestId:'forged-full-access',access:'full',confirmFullAccess:true}),/管理员/);
   assert.equal(peer.turnStarts.length,0);
 });
+
+
+test('projectless plaintext with empty browser context reaches turn/start; real file references stay denied',async t=>{
+  const {service,peer}=await fixture();t.after(()=>service.disconnect());
+  const admin={uuid:'admin',elevated:true},root=service.project(admin,'projectless').root;
+  await mkdir(root);(peer as any).threads.push({id:'loose-thread',cwd:root,status:'idle'});
+  const payload={text:'Hello',requestId:'projectless-browser-123',attachments:[],references:[],extensions:[]};
+  const sending=service.send(admin,'projectless','loose-thread',payload);
+  await Promise.race([peer.waitForTurnStarts(1),sending]);
+  assert.equal(peer.requests.filter(r=>r.method==='turn/start').length,1);
+  peer.resolveTurnStart('loose-thread');await sending;
+  await assert.rejects(service.send(admin,'projectless','loose-thread',{...payload,requestId:'projectless-files-123',references:['secret.txt']}),hasCode('PROJECTLESS_FILES'));
+  await assert.rejects(service.send(admin,'projectless','loose-thread',{...payload,requestId:'projectless-invalid-123',references:{length:0}}),hasCode('INVALID_REFERENCES'));
+  assert.equal(peer.requests.filter(r=>r.method==='turn/start').length,1);
+});
+test('a project-busy preflight does not poison the same message id for a later manual send',async t=>{
+  const {service,peer,identity,roots}=await fixture();t.after(()=>service.disconnect());
+  const external={id:'external',cwd:roots.alpha,status:'running'};(peer as any).threads.push(external);
+  const payload={text:'Hello',requestId:'busy-manual-retry-123',references:[],attachments:[]};
+  await assert.rejects(service.send(identity,'alpha','thread-alpha',payload),hasCode('PROJECT_BUSY'));
+  assert.equal(peer.requests.filter(r=>r.method==='turn/start').length,0);
+  external.status='idle';const sending=service.send(identity,'alpha','thread-alpha',payload);
+  await Promise.race([peer.waitForTurnStarts(1),sending]);peer.resolveTurnStart('thread-alpha');const result=await sending;
+  assert.deepEqual(await service.send(identity,'alpha','thread-alpha',payload),result);
+  assert.equal(peer.requests.filter(r=>r.method==='turn/start').length,1);
+});

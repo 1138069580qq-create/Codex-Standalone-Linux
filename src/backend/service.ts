@@ -202,7 +202,7 @@ export class CodexConsoleService {
     requireAdmin(identity);const prepared=await prepareProjectDirectory(this.config,input),canonical=prepared.root;
     const existing=this.config.value.projects.find(p=>p.root===canonical);if(existing)return this.projects(identity).find(p=>p.id===existing.id);
     const p={id:'p-'+createHash('sha256').update(canonical).digest('hex').slice(0,20),name:input.name.trim(),root:canonical,grants:[]};
-    return this.receipts.run(identity.uuid+':project:'+input.requestId,async()=>{await materializeProjectDirectory(this.config,prepared,p.name);await this.config.save({...this.config.value,projects:[...this.config.value.projects,p]});return this.projects(identity).find(v=>v.id===p.id);});
+    return this.receipts.run(identity.uuid+':project:'+input.requestId,async markSubmitted=>{await materializeProjectDirectory(this.config,prepared,p.name);markSubmitted();await this.config.save({...this.config.value,projects:[...this.config.value.projects,p]});return this.projects(identity).find(v=>v.id===p.id);},{trackSubmission:true});
   }
   async taskAction(identity:Identity,projectId:string,id:string,action:string,input:any):Promise<any>{
     const project=this.project(identity,projectId,'send');const thread=await this.verifyThread(project,id);
@@ -558,9 +558,9 @@ export class CodexConsoleService {
       if (input.extensions.length) content.push(...resolveExtensions(await this.catalogFor(project.root,true),input.extensions));
     }
     if (input.references !== undefined) {
-      this.project(identity,projectId,"files");
       if (!Array.isArray(input.references) || input.references.length > 12 || input.references.some((v: unknown)=>typeof v!=="string"))
         throw new ConsoleError(400,"INVALID_REFERENCES","最多引用 12 个文件或文件夹。");
+      if (input.references.length) this.project(identity,projectId,"files");
       for(const rel of [...new Set<string>(input.references)])
         content[0].text += `\n\nProject reference: ${await projectReference(project.root,rel)}`;
     }
@@ -582,7 +582,7 @@ export class CodexConsoleService {
         content.push({ type: "localImage", path: absolute });
       else content[0].text += `\n\nAttached project file: ${rel}`;
     }
-    return this.receipts.run(`${identity.uuid}:${id}:${input.requestId}`, async () => {
+    return this.receipts.run(`${identity.uuid}:${id}:${input.requestId}`, async markSubmitted => {
       if (
         runtimeStatus(thread) === "running" ||
         session.status === "running" ||
@@ -624,7 +624,9 @@ export class CodexConsoleService {
             "PROJECT_BUSY",
             "A task is already running in this project, possibly in another Codex client."
           );
-        const result = await this.rpc().request<any>("turn/start", {
+        const peer = this.rpc();
+        markSubmitted();
+        const result = await peer.request<any>("turn/start", {
           threadId: id,
           input: content,
           cwd: project.root,
@@ -654,7 +656,7 @@ export class CodexConsoleService {
       } finally {
         this.reservations.delete(projectId);
       }
-    });
+    }, { trackSubmission: true });
   }
   async interrupt(identity: Identity, projectId: string, id: string) {
     const project = this.project(identity, projectId, "send");
