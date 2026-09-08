@@ -42,14 +42,14 @@
           <input id="menu-query" class="menu-search" placeholder="搜索技能、插件或命令" aria-label="搜索技能、插件或命令" autocomplete="off">
           <div id="menu-list" role="listbox" aria-label="技能与命令列表"></div><p id="menu-status" class="footnote" role="status"></p>
         </section>
-        <div id="attachments" class="attachment-list"></div>
+        <p id="new-task-note" class="footnote" hidden>在当前项目目录新建；首条消息仅支持文本，权限沿用桌面设置。</p><div id="attachments" class="attachment-list"></div>
         <label for="prompt" class="sr-only">发送给 Codex 的消息</label>
         <textarea id="prompt" placeholder="发送消息，输入 / 选择技能" rows="3" maxlength="64000" aria-controls="menu-list" aria-expanded="false"></textarea>
         <div class="composer-controls">
           <button id="attach" type="button" class="icon" aria-label="添加文件、技能或插件" aria-expanded="false" aria-controls="composer-menu">＋</button>
           <input id="upload" type="file" multiple hidden>
           <div class="compose-selects"><select id="model" aria-label="模型"><option value="">默认模型</option></select><select id="effort" aria-label="推理强度"><option value="">默认强度</option></select><select id="mode" aria-label="协作模式"><option value="code">执行</option><option value="plan">计划</option></select></div>
-          <button id="stop" type="button" class="danger" hidden>停止</button><button id="send" type="submit" class="primary">发送 ↑</button>
+          <button id="check-creation" type="button" class="small" hidden>检查创建状态</button><button id="stop" type="button" class="danger" hidden>停止</button><button id="send" type="submit" class="primary">发送 ↑</button>
         </div>
         <div class="composer-footer"><select id="access" aria-label="访问权限"><option value="default">默认权限</option><option value="read-only">只读</option><option value="full">完全访问</option></select><span id="settings-source" hidden></span><button id="follow-desktop" type="button" class="small" hidden>跟随桌面</button><span id="stream-state">Ctrl / ⌘ + Enter 发送</span></div>
       </form>

@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 const S = { user:null, csrf:'', projects:[], models:[], project:null, thread:null, threads:[], next:null,
   items:new Map(), pending:new Map(), status:'idle', cursor:'', stream:null, epoch:0, retry:0,
   timer:null, hiddenTimer:null, renderTimer:null, nodes:new Map(), attachments:[], bytes:0, truncated:false,
-  connected:false, attachedThreadId:null, capabilities:{}, panel:'quota', filePath:'.', syncing:null, sending:false, attempt:null, creationId:null,
+  connected:false, newTask:false, taskCreation:null, creationTimer:null, checkingCreation:false, attachedThreadId:null, capabilities:{}, panel:'quota', filePath:'.', syncing:null, sending:false, attempt:null, creationId:null,
   selected:[], references:[], goalDraft:'', accessConfirmed:false, tokenUsage:null, threadSettings:null, settingsOverrides:{}, modelRequest:null, modelsUnavailable:false,
   catalog:null, catalogProject:null, catalogRequest:null, menuMode:'plus', menuOpen:false, menuItems:[], menuIndex:0, referencePath:'.' };
 const bytes = n => n < 1024 ? `${n} B` : n < 1048576 ? `${(n/1024).toFixed(1)} KiB` : `${(n/1048576).toFixed(1)} MiB`;
@@ -24,7 +24,7 @@ async function api(url, body, method=body===undefined?'GET':'POST') {
     if(!response.ok) {
       if(response.status===401 && S.user) loggedOut();
       const message=data.data?.code==='BACKEND_ERROR'?'Codex 请求失败，请检查连接或登录状态。':data.data?.message;
-      const error=new Error(message || `请求失败 (${response.status})`); error.status=response.status; throw error;
+      const error=new Error(message || `请求失败 (${response.status})`); error.status=response.status;error.code=data.data?.code; throw error;
     }
     return data;
   } catch(error) {
@@ -36,29 +36,35 @@ const q = params => new URLSearchParams(params).toString();
 const apiProject = (route, extra={}) => `/api/codex/${route}?${q({projectId:S.project?.id||'',...extra})}`;
 function permission(name) { return !!S.project?.permissions?.[name]; }
 function closeStream() { clearTimeout(S.timer); S.timer=null; S.stream?.close(); S.stream=null; }
-function clearConversation() { S.epoch++; closeStream(); clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='新任务'; S.selected=[]; S.references=[]; S.goalDraft=''; S.accessConfirmed=false; S.tokenUsage=null; S.threadSettings=null; S.settingsOverrides={}; $('access').value='default'; closeMenu(); $('prompt').value=''; renderAttachments(); controls(); }
+function clearConversation() { clearTimeout(S.creationTimer);S.creationTimer=null;S.newTask=false;S.taskCreation=null;S.epoch++; closeStream(); clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='新任务'; S.selected=[]; S.references=[]; S.goalDraft=''; S.accessConfirmed=false; S.tokenUsage=null; S.threadSettings=null; S.settingsOverrides={}; $('access').value='default'; closeMenu(); $('prompt').value=''; renderAttachments(); controls(); }
 function loggedOut() { clearConversation(); S.user=null; S.csrf=''; S.connected=false; S.attachedThreadId=null; S.capabilities={}; S.projects=[]; S.threads=[]; S.project=null; S.models=[]; S.items.clear(); $('workspace').hidden=true; $('login-view').hidden=false; $('settings-dialog').close(); $('new-thread-dialog').close(); for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close(); $('password').value=''; S.catalog=null; }
 function supports(capability) {
   if(capability==='createThread' && S.attachedThreadId)return false;
   return S.capabilities?.[capability]!==false;
 }
+function canStartTask(){return supports('createThread') || S.capabilities?.createWithMessage===true&&S.project?.canCreateTask!==false;}
 function commandAvailable(command) {
+  if(command.id==='new')return canStartTask();
+  if(S.newTask&&['upload','references','plan','code','permissions','goal'].includes(command.id))return false;
   const capability={new:'createThread',skills:'extensions',plugins:'extensions',mcp:'mcp',goal:'setGoal'}[command.id];
   return (!capability || supports(capability)) && (!command.files || permission('files'));
 }
 function controls() {
   const ready=!!S.project && S.connected && permission('send');
-  $('send').disabled=!ready || S.status==='running' || S.sending;
+  $('send').disabled=!ready || S.status==='running' || S.sending || !!S.taskCreation;
+  $('check-creation').hidden=!S.taskCreation; $('check-creation').disabled=S.sending||S.checkingCreation;
+  $('new-task-note').hidden=!S.newTask;
+  $('empty').querySelector('p').textContent=S.newTask?'输入首条消息后创建任务':supports('extensions')?'输入消息，或用 / 选择技能':'输入消息，或用 / 选择功能';
   $('prompt').disabled=!ready || S.sending;
   $('stop').hidden=S.status!=='running'; $('stop').disabled=!ready || !S.thread;
-  $('attach').disabled=!ready || S.sending;
-  $('access').disabled=!ready || S.sending;
-  for(const id of ['model','effort','mode'])$(id).disabled=!ready || S.sending || (id!=='mode'&&S.modelsUnavailable);
+  $('attach').disabled=!ready || S.sending || S.newTask;
+  $('access').disabled=!ready || S.sending || S.newTask;
+  for(const id of ['model','effort','mode'])$(id).disabled=!ready || S.sending || (id!=='mode'&&S.modelsUnavailable) || (id==='mode'&&S.newTask);
   $('access').querySelector('option[value=full]').disabled=!S.user?.admin;
   $('sidebar-plugins').disabled=!S.connected || !S.project || !supports('extensions');
   $('sidebar-plugins').title=supports('extensions')?'':'此连接暂不支持，请在 Codex 桌面使用。';
-  $('new-thread').hidden=!supports('createThread');
-  $('new-thread').disabled=!S.connected || !permission('send') || S.sending || !supports('createThread');
+  $('new-thread').hidden=!supports('createThread')&&S.capabilities?.createWithMessage!==true;
+  $('new-thread').disabled=!S.connected || !permission('send') || S.sending || !canStartTask();
   $('refresh-quota').hidden=!supports('quota');
   $('refresh-quota').disabled=!S.connected || !supports('quota');
   $('project-select').disabled=S.sending; $('settings').disabled=S.sending;
@@ -69,7 +75,8 @@ function controls() {
   $('refresh-files').disabled=!permission('files'); $('refresh-diff').disabled=!permission('files');
 }
 async function restoreAttachedThread(refresh=false) {
-  if(!S.attachedThreadId)return false;
+  if(!S.attachedThreadId||S.newTask)return false;
+  if(S.thread&&S.capabilities?.switchThreads===true){if(refresh)await syncSnapshot();return true;}
   if(S.thread?.id===S.attachedThreadId){if(refresh)await syncSnapshot();return true;}
   const thread=S.threads.find(t=>t.id===S.attachedThreadId);
   if(!thread)throw new Error('当前桌面任务未加载，请刷新任务列表。');
@@ -81,11 +88,73 @@ async function restoreAttachedThread(refresh=false) {
 }
 async function startNewConversation() {
   if(S.sending)return;
-  if(S.attachedThreadId){await restoreAttachedThread(true);notice('已连接桌面当前任务。');}
+  if(S.capabilities?.createWithMessage===true){
+    if(!canStartTask())throw new Error('请先在桌面保存此项目。');
+    const warning=S.taskCreation?'上次创建尚未确认，继续会新建另一个任务。\n':'';
+    if(!await confirmAction('在当前目录新建任务',warning+'目录：'+S.project.root+'\n不另建 worktree。发送首条消息时才创建，权限和执行模式使用桌面设置。'))return;
+    clearConversation();forgetCreation();forgetSelectedTask();S.newTask=true;S.settingsOverrides={};
+    const option=el('option','桌面默认模型');option.value='';$('model').prepend(option);$('model').value='';loadEfforts('');
+    $('mode').value='code';if(!$('access').querySelector('option[value=desktop-default]')){const option=el('option','桌面设置');option.value='desktop-default';option.disabled=true;$('access').append(option);}$('access').value='desktop-default';renderSettingsSource();renderThreads();controls();notice();
+  }else if(S.attachedThreadId){await restoreAttachedThread(true);notice('已连接桌面当前任务。');}
   else {if(!supports('createThread'))throw new Error('此连接不支持新建任务。');clearConversation();renderThreads();}
   $('prompt').focus();
 }
-async function signedIn(data) { S.user=data.user; S.csrf=data.csrf; $('login-view').hidden=true; $('workspace').hidden=false; $('password').value=''; $('user-name').textContent=S.user.username; await refreshContext(); }
+function selectedTaskStorageKey(){return 'codex-webui-selected-task:'+S.user?.id;}
+function rememberSelectedTask(){if(!S.capabilities?.switchThreads||!S.thread)return;try{sessionStorage.setItem(selectedTaskStorageKey(),JSON.stringify({threadId:S.thread.id,projectId:S.project.id}));}catch{}}
+function forgetSelectedTask(){try{sessionStorage.removeItem(selectedTaskStorageKey());}catch{}}
+async function restoreSelectedTask(){
+  if(!S.capabilities?.switchThreads)return;let saved;try{saved=JSON.parse(sessionStorage.getItem(selectedTaskStorageKey())||'null');}catch{return;}
+  if(saved?.projectId!==S.project?.id||!saved?.threadId)return;
+  const thread=S.threads.find(t=>t.id===saved.threadId);if(thread)await selectThread(thread);
+}
+function creationStorageKey(){return 'codex-webui-creation:'+S.user?.id;}
+function rememberCreation(record){try{sessionStorage.setItem(creationStorageKey(),JSON.stringify({requestId:record.requestId,projectId:record.projectId}));}catch{}}
+function forgetCreation(){try{sessionStorage.removeItem(creationStorageKey());}catch{}}
+async function applyCreationResult(result,epoch){
+  if(epoch!==S.epoch)return;
+  S.taskCreation=result;rememberCreation(result);
+  if(result.messageAccepted===true)$('prompt').value='';
+  if(result.thread){
+    if(S.thread?.id!==result.thread.id){S.epoch++;closeStream();S.syncing=null;}
+    S.newTask=false;S.thread=result.thread;S.status=result.thread.status;S.settingsOverrides={};S.attempt=null;
+    S.threads=[result.thread,...S.threads.filter(t=>t.id!==result.thread.id)];$('thread-title').textContent=result.thread.title;renderThreads();
+    await syncSnapshot();rememberSelectedTask();
+    if(result.messageAccepted===true||result.messageAccepted===false){S.taskCreation=null;forgetCreation();}
+    notice(result.message||'');renderSettingsSource();controls();return;
+  }
+  notice(result.message||(result.status==='submitting'?'桌面正在创建任务…':'创建结果尚未确认，请检查状态，不要重复发送。'));controls();
+}
+function scheduleCreationCheck(epoch,requestId,attempt=0){
+  clearTimeout(S.creationTimer);if(attempt>=5||epoch!==S.epoch)return;
+  S.creationTimer=setTimeout(async()=>{if(epoch!==S.epoch||S.taskCreation?.requestId!==requestId)return;try{await checkCreation(false);}catch{}if(S.taskCreation?.requestId===requestId&&S.taskCreation.status!=='failed'&&S.taskCreation.status!=='unknown')scheduleCreationCheck(epoch,requestId,attempt+1);},Math.min(8000,1000*2**attempt));
+}
+async function checkCreation(manual=true){
+  if(!S.taskCreation||S.checkingCreation)return;
+  const epoch=S.epoch,id=S.taskCreation.requestId;S.checkingCreation=true;controls();
+  try{const result=await api('/api/codex/task-creations/'+encodeURIComponent(id));await applyCreationResult(result,epoch);}
+  catch(error){if(epoch===S.epoch||S.taskCreation?.requestId===id)notice(error.status===404?'暂未找到创建记录。请求 ID 已保留，请检查桌面后再决定是否新建。':error.message);if(manual)throw error;}
+  finally{S.checkingCreation=false;controls();}
+}
+async function resumeCreation(){
+  let saved;try{saved=JSON.parse(sessionStorage.getItem(creationStorageKey())||'null');}catch{return;}
+  if(!saved?.requestId||!S.projects.some(p=>p.id===saved.projectId))return;
+  if(S.project.id!==saved.projectId)await chooseProject(saved.projectId);
+  clearConversation();S.newTask=true;S.taskCreation={...saved,status:'submitting'};renderSettingsSource();await checkCreation(false);
+  if(S.taskCreation)scheduleCreationCheck(S.epoch,saved.requestId);
+}
+async function sendNewDesktopTask(){
+  if(S.taskCreation){await checkCreation();return;}
+  const epoch=S.epoch,requestId=CodexState.requestId();
+  const body={requestId,projectId:S.project.id,text:$('prompt').value,environment:'local',confirmCurrentDirectory:true,model:$('model').value,effort:$('effort').value,settingsOverrides:Object.keys(S.settingsOverrides||{}),attachments:[],extensions:[],references:[]};
+  S.taskCreation={requestId,projectId:S.project.id,status:'submitting'};rememberCreation(S.taskCreation);notice('桌面正在创建任务…');
+  let responseReceived=false;
+  try{const result=await api('/api/codex/task-creations',body);responseReceived=true;await applyCreationResult(result,epoch);if(S.taskCreation?.requestId===requestId)scheduleCreationCheck(S.epoch,requestId);}
+  catch(error){
+    if(epoch===S.epoch||S.taskCreation?.requestId===requestId){if(!responseReceived&&error.status&&error.status<500&&error.code!=='CREATION_CHANGED'){S.taskCreation=null;forgetCreation();throw error;}
+      notice(responseReceived?'桌面已返回创建结果，但输出暂未读取。请检查创建状态，不要重发。':'创建结果尚未确认，正在检查。不会重复发送首条消息。');scheduleCreationCheck(S.epoch,requestId);}
+  }
+}
+async function signedIn(data) { S.user=data.user; S.csrf=data.csrf; $('login-view').hidden=true; $('workspace').hidden=false; $('password').value=''; $('user-name').textContent=S.user.username; await refreshContext();await restoreSelectedTask(); await resumeCreation(); }
 async function refreshContext() {
   const [status, projects]=await Promise.all([api('/api/codex/status'),api('/api/codex/projects')]);
   S.connected=status.connected; S.attachedThreadId=status.attachedThreadId||null; S.capabilities=status.capabilities||{}; S.projects=projects; $('project-count').textContent=String(projects.length);
@@ -129,8 +198,9 @@ function renderThreads() {
 }
 async function selectThread(thread) {
   if(S.sending) throw new Error('消息正在提交，请稍后切换。');
-  if(S.attachedThreadId){if(thread.id!==S.attachedThreadId)throw new Error('此连接仅支持桌面当前任务。');await restoreAttachedThread(true);return;}
-  clearConversation(); S.thread=thread; $('thread-title').textContent=thread.title; $('sidebar').classList.remove('mobile-open'); renderThreads(); await syncSnapshot();
+  if(S.thread?.id===thread.id){await syncSnapshot();return;}
+  if(S.attachedThreadId&&S.capabilities?.switchThreads!==true){if(thread.id!==S.attachedThreadId)throw new Error('此连接仅支持桌面当前任务。');await restoreAttachedThread(true);return;}
+  clearConversation(); S.thread=thread; $('thread-title').textContent=thread.title; $('sidebar').classList.remove('mobile-open'); renderThreads(); await syncSnapshot();rememberSelectedTask();
 }
 async function syncSnapshot() {
   if(!S.thread || !S.project) return;
@@ -222,12 +292,13 @@ async function loadModels(){
   if(S.modelRequest)return S.modelRequest;
   const epoch=S.epoch;
   const pending=(async()=>{try{
-    const result=await api('/api/codex/models');if(epoch!==S.epoch)return;
+    const result=await api(S.thread?apiProject('models',{threadId:S.thread.id}):'/api/codex/models');if(epoch!==S.epoch)return;
     const selection=$('model').value,effort=$('effort').value;
     S.models=result.data;S.modelsUnavailable=false;$('model').replaceChildren();
+    if(S.newTask){const option=el('option','桌面默认模型');option.value='';$('model').append(option);}
     for(const model of S.models){const option=el('option',model.displayName||model.model||model.id);option.value=model.model||model.id;option.selected=!!model.isDefault;$('model').append(option);}
     if(S.attachedThreadId&&S.settingsOverrides?.model&&selection&&!S.models.some(m=>(m.model||m.id)===selection)){const stale=el('option',selection+' · 已不在目录');stale.value=selection;stale.disabled=true;$('model').append(stale);}
-    if(S.models.some(m=>(m.model||m.id)===selection)||S.attachedThreadId&&S.settingsOverrides?.model&&selection){$('model').value=selection;loadEfforts(effort);}else loadEfforts();
+    if(S.newTask&&selection===''||S.models.some(m=>(m.model||m.id)===selection)||S.attachedThreadId&&S.settingsOverrides?.model&&selection){$('model').value=selection;loadEfforts(effort);}else loadEfforts();
     if(S.attachedThreadId){if(result.settings)S.threadSettings=result.settings;renderThreadSettings();}
     $('model').title=result.source||'';controls();
   }catch(error){if(epoch===S.epoch){S.modelsUnavailable=true;S.models=[];$('model').replaceChildren();renderThreadSettings();controls();}throw error;}})();
@@ -243,12 +314,12 @@ function markSettings(...keys){if(S.attachedThreadId){S.settingsOverrides||={};f
 function renderSettingsSource(){
   $('settings-source').hidden=!S.attachedThreadId;
   const modified=Object.keys(S.settingsOverrides||{}).length>0;
-  $('settings-source').textContent=modified?'下次发送应用更改':'跟随桌面';
+  $('settings-source').textContent=S.newTask?'桌面新任务设置':modified?'下次发送应用更改':'跟随桌面';
   $('settings-source').title=S.threadSettings?.provider||'';
-  $('follow-desktop').hidden=!S.attachedThreadId||!modified;
+  $('follow-desktop').hidden=!S.attachedThreadId||!modified||S.newTask;
 }
 function renderThreadSettings(){
-  const settings=S.threadSettings;if(!S.attachedThreadId||!settings){renderSettingsSource();return;}
+  const settings=S.threadSettings;if(!S.attachedThreadId||!settings||S.newTask){renderSettingsSource();return;}
   const changed=S.settingsOverrides||{},effort=changed.effort?$('effort').value:settings.effort||'';
   if(!changed.model&&settings.model){
     if(!Array.from($('model').options).some(o=>o.value===settings.model)){const option=el('option',settings.model+' · 当前任务');option.value=settings.model;$('model').append(option);}
@@ -271,6 +342,8 @@ async function sendMessage(){
   S.sending=true;
   try {
     controls();
+    if(S.newTask){await sendNewDesktopTask();return;}
+    if(S.taskCreation)throw new Error('请先检查首条消息的创建状态。');
     const content={text:$('prompt').value,projectId:S.project.id,model:$('model').value,effort:$('effort').value,mode:$('mode').value,attachments:[...S.attachments],extensions:S.selected.map(e=>e.id),references:[...S.references],access:$('access').value,confirmFullAccess:S.accessConfirmed,...(S.attachedThreadId?{settingsOverrides:Object.keys(S.settingsOverrides||{})}:{})};
     if(S.attachedThreadId && !await restoreAttachedThread())return;
     if(S.status==='running')throw new Error('任务仍在运行，请等待本轮结束。');
@@ -361,11 +434,12 @@ $('logout').onclick=action(async()=>{await api('/api/logout',{});loggedOut();});
 $('project-select').onchange=action(()=>chooseProject($('project-select').value));
 $('thread-filter').oninput=renderThreads;$('refresh-threads').onclick=action(()=>loadThreads());$('more-threads').onclick=action(()=>loadThreads(true));
 $('new-thread').onclick=action(startNewConversation);
+$('check-creation').onclick=action(()=>checkCreation());
 $('cancel-new-thread').onclick=()=>$('new-thread-dialog').close();
 $('new-thread-form').onsubmit=action(async()=>{if(!supports('createThread'))throw new Error('此连接不支持新建任务。');const title=$('new-thread-title').value;const epoch=S.epoch;const submit=document.querySelector('#new-thread-form button[type=submit]');if(submit.disabled)return;submit.disabled=true;try{const thread=await api('/api/codex/threads',{projectId:S.project.id,title});$('new-thread-dialog').close();if(epoch===S.epoch){S.threads.unshift(thread);await selectThread(thread);}}finally{submit.disabled=false;}});
 $('composer').onsubmit=action(sendMessage);$('prompt').onkeydown=promptKey;
 $('prompt').oninput=()=>{S.menuIndex=0;if(/^\/[^\n]*$/.test($('prompt').value)){openMenu('slash').catch(e=>toast(e.message,true));}else if(S.menuMode==='slash')closeMenu();};
-$('model').onchange=()=>{loadEfforts();markSettings('model','effort');};$('effort').onchange=()=>markSettings('effort');$('mode').onchange=()=>markSettings('mode');$('follow-desktop').onclick=()=>{if(S.sending)return;S.settingsOverrides={};renderThreadSettings();};$('stop').onclick=action(async()=>{await api(`/api/codex/threads/${encodeURIComponent(S.thread.id)}/interrupt`,{projectId:S.project.id});});
+$('model').onchange=()=>{loadEfforts();if(S.newTask&&!$('model').value){delete S.settingsOverrides.model;delete S.settingsOverrides.effort;renderSettingsSource();}else markSettings('model','effort');};$('effort').onchange=()=>markSettings('effort');$('mode').onchange=()=>markSettings('mode');$('follow-desktop').onclick=()=>{if(S.sending)return;S.settingsOverrides={};renderThreadSettings();};$('stop').onclick=action(async()=>{await api(`/api/codex/threads/${encodeURIComponent(S.thread.id)}/interrupt`,{projectId:S.project.id});});
 $('attach').onclick=action(()=>S.menuOpen?closeMenu():openMenu('plus'));$('upload').onchange=action(uploadFile);
 $('connect').onclick=action(async()=>{await api('/api/codex/admin/connect',{});await refreshContext();if(S.thread)await syncSnapshot();toast('已连接');});
 $('settings').onclick=action(openSettings);$('close-settings').onclick=()=>$('settings-dialog').close();

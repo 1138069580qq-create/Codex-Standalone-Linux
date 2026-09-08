@@ -7,11 +7,11 @@ import { webcrypto } from 'node:crypto';
 const stateSource = fs.readFileSync(path.join(__dirname,'../public/state.js'),'utf8');
 const source = fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8');
 function setup() {
-  const elements:any = new Proxy({}, {get(target:any,key:any){return target[key] ||= {value:'',textContent:'',hidden:false,disabled:false,focus:()=>{},querySelector:()=>({disabled:false})};}});
+  const elements:any = new Proxy({}, {get(target:any,key:any){return target[key] ||= {value:'',textContent:'',hidden:false,disabled:false,focus:()=>{},prepend:()=>{},querySelector:()=>({disabled:false})};}});
   elements.access.value='default';elements.prompt.value='hello';elements.model.value='test-model';elements.effort.value='low';elements.mode.value='code';
   const S:any={user:{admin:true},connected:true,project:{id:'demo'},thread:null,threads:[],status:'idle',sending:false,epoch:1,attachments:[],selected:[],references:[],goalDraft:'',accessConfirmed:false,attempt:null};
-  const calls:any[]=[]; const notices:string[]=[]; let cleared=0;
-  const c:any={module:{exports:{}},crypto:{getRandomValues:webcrypto.getRandomValues.bind(webcrypto)},Uint8Array,document:{},S,$:(id:string)=>elements[id],permission:()=>true,stateName:(v:string)=>v,renderThreads:()=>{},renderAttachments:()=>{},renderSettingsSource:()=>{},notice:(v='')=>notices.push(v),clearConversation:()=>{cleared++;S.epoch++;S.thread=null;elements.prompt.value='';},syncSnapshot:async()=>{},api:async(url:string,body:any)=>{calls.push({url,body});return url.endsWith('/threads')?{id:'real-created',title:'hello',status:'idle'}:{ok:true};}};
+  const calls:any[]=[]; const notices:string[]=[]; let cleared=0;const storage=new Map<string,string>();
+  const c:any={module:{exports:{}},crypto:{getRandomValues:webcrypto.getRandomValues.bind(webcrypto)},Uint8Array,document:{},sessionStorage:{getItem:(k:string)=>storage.get(k)||null,setItem:(k:string,v:string)=>storage.set(k,v),removeItem:(k:string)=>storage.delete(k)},setTimeout:()=>1,clearTimeout:()=>{},confirmAction:async()=>true,el:()=>({}),loadEfforts:()=>{},S,$:(id:string)=>elements[id],permission:()=>true,stateName:(v:string)=>v,closeStream:()=>{},renderThreads:()=>{},renderAttachments:()=>{},renderSettingsSource:()=>{},notice:(v='')=>notices.push(v),clearConversation:()=>{cleared++;S.epoch++;S.thread=null;elements.prompt.value='';},syncSnapshot:async()=>{},api:async(url:string,body:any)=>{calls.push({url,body});return url.endsWith('/threads')?{id:'real-created',title:'hello',status:'idle'}:{ok:true};}};
   vm.runInNewContext(stateSource,c);c.CodexState=c.module.exports;
   for(const [a,b] of [['function supports(','async function signedIn('],['async function sendMessage()','function renderAttachments()'],['async function selectThread(','async function syncSnapshot()'],['async function loadQuota()','function renderQuota('],['async function loadCatalog(','async function openMenu(']])vm.runInNewContext(source.slice(source.indexOf(a),source.indexOf(b)),c);
   return {c,S,elements,calls,notices,get cleared(){return cleared;}};
@@ -102,4 +102,32 @@ test('ordinary app-server mode retains new-task and extension commands',async()=
   await c.startNewConversation();assert.equal(state.cleared,1);assert.equal(S.thread,null);
   c.controls();assert.equal(elements['new-thread'].hidden,false);
   for(const id of ['new','skills','plugins','mcp','goal'])assert.equal(c.commandAvailable({id}),true,id);
+});
+
+function managed(){const result=attached();result.S.capabilities.createWithMessage=true;result.S.capabilities.switchThreads=true;result.S.project.canCreateTask=true;result.S.project.root='test-project';return result;}
+test('managed desktop enables new task and enters an empty draft only after confirmation, without a write',async()=>{
+  const state=managed();const {c,S,elements,calls}=state;c.controls();assert.equal(elements['new-thread'].hidden,false);assert.equal(elements['new-thread'].disabled,false);
+  c.confirmAction=async()=>false;await c.startNewConversation();assert.equal(state.cleared,0);assert.equal(calls.length,0);
+  c.confirmAction=async()=>true;await c.startNewConversation();assert.equal(state.cleared,1);assert.equal(S.newTask,true);assert.equal(S.thread,null);assert.equal(calls.length,0);
+  c.controls();assert.equal(elements.send.disabled,false);assert.equal(elements.attach.disabled,true);assert.equal(elements.access.disabled,true);
+});
+test('managed desktop first send creates once and switches to returned task without a second messages request',async()=>{
+  const {c,S,elements,calls}=managed();S.newTask=true;
+  c.api=async(url:string,body:any)=>{calls.push({url,body});return {requestId:body.requestId,projectId:'demo',status:'ready',threadId:'created',messageAccepted:true,thread:{id:'created',title:'Created',status:'idle'}};};
+  await c.sendMessage();assert.equal(calls.length,1);assert.equal(calls[0].url,'/api/codex/task-creations');assert.equal(calls[0].body.text,'hello');
+  assert.equal(calls[0].body.confirmCurrentDirectory,true);assert.equal(S.thread.id,'created');assert.equal(S.newTask,false);assert.equal(elements.prompt.value,'');assert.equal(S.taskCreation,null);assert.equal(S.sending,false);
+});
+test('managed desktop unknown create locks only duplicate sending and read-only check recovers without replay',async()=>{
+  const {c,S,elements,calls}=managed();S.newTask=true;
+  c.api=async(url:string,body:any)=>{calls.push({url,body});if(body)throw new Error('network lost after submit');return {requestId:S.taskCreation.requestId,projectId:'demo',status:'ready',messageAccepted:true,thread:{id:'recovered',title:'Recovered',status:'idle'}};};
+  await c.sendMessage();assert.equal(calls.length,1);assert.equal(elements.prompt.value,'hello');assert.equal(S.sending,false);assert.equal(elements.send.disabled,true);assert.equal(elements.settings.disabled,false);
+  await c.sendMessage();assert.equal(calls.length,2);assert.equal(calls[1].body,undefined);assert.match(calls[1].url,/task-creations/);assert.equal(S.thread.id,'recovered');assert.equal(elements.prompt.value,'');
+});
+test('created task whose first message failed keeps draft and does not create again',async()=>{
+  const {c,S,elements,calls}=managed();S.newTask=true;
+  c.api=async(url:string,body:any)=>{calls.push({url,body});return {requestId:body.requestId,projectId:'demo',status:'ready',messageAccepted:false,thread:{id:'created',title:'Created',status:'idle'},message:'first message failed'};};
+  await c.sendMessage();assert.equal(calls.length,1);assert.equal(S.newTask,false);assert.equal(S.thread.id,'created');assert.equal(elements.prompt.value,'hello');assert.equal(S.taskCreation,null);
+});
+test('managed desktop snapshot reconnect does not force a selected new task back to the anchor',async()=>{
+  const {c,S}=managed();S.thread={id:'selected-new-task'};await c.restoreAttachedThread();assert.equal(S.thread.id,'selected-new-task');
 });

@@ -273,7 +273,7 @@ export class CodexConsoleService {
       return {goal:g?{objective:String(g.objective||"").slice(0,4000),status:String(g.status||""),tokensUsed:g.tokensUsed,timeUsedSeconds:g.timeUsedSeconds}:null};
     } catch { throw new ConsoleError(502,"GOAL_UNAVAILABLE","此 Codex 未能读取或保存目标。"); }
   }
-  async models(identity: Identity) {
+  async models(identity: Identity, _projectId?: string, _threadId?: string) {
     if (
       !this.config.value.projects.some((p) => permissions(p, identity).view) &&
       !identity.elevated
@@ -432,6 +432,8 @@ export class CodexConsoleService {
       cursor: this.hub.cursor
     };
   }
+  async createTask(_identity: Identity, _projectId: string, _input: any): Promise<any> { throw new ConsoleError(501, 'CREATION_UNAVAILABLE', 'This connection does not support combined task creation.'); }
+  async taskCreation(_identity: Identity, _requestId: string): Promise<any> { throw new ConsoleError(404, 'CREATION_NOT_FOUND', 'Task creation is not available on this connection.'); }
   async createThread(identity: Identity, projectId: string, title?: string, requestId?: string) {
     const project = this.project(identity, projectId, "send");
     if (title !== undefined && (typeof title !== "string" || title.length > 120))

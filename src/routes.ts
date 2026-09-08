@@ -108,8 +108,10 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
   );
   router.get(
     "/models",
-    wrap((_c, who) => service.models(who))
+    wrap((c, who) => service.models(who, param(c, "projectId", 64) || undefined, param(c, "threadId", 128) || undefined))
   );
+  router.post('/task-creations',wrap((c,who)=>{rateLimit(who,'create',10);const b=body(c);return service.createTask(who,b.projectId,b);}));
+  router.get('/task-creations/:id',wrap((c,who)=>{rateLimit(who,'creation-status',60);return service.taskCreation(who,c.params.id);}));
   router.get("/extensions",wrap((c,who)=>{ rateLimit(who,"extensions",30); return service.extensions(who,param(c,"projectId",64),c.query.refresh==="1"); }));
   router.get("/mcp",wrap((c,who)=>service.mcp(who,param(c,"projectId",64),param(c,"threadId",128)||undefined)));
   router.get("/threads/:id/goal",wrap((c,who)=>service.goal(who,param(c,"projectId",64),c.params.id)));

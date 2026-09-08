@@ -6,9 +6,10 @@ import { UserStore } from '../src/auth';
 import { ProtectedConfigStore } from '../src/protected-config';
 import { createApp } from '../src/server';
 import { DesktopIpc } from '../src/backend/desktop-ipc';
-import { DesktopSessionService } from '../src/backend/desktop-session';
+import { DesktopWorkspaceService } from '../src/backend/desktop-workspace';
+import { DesktopTools } from '../src/backend/desktop-tools';
 
-// Explicit user-driven local attachment. No spawn/exec, no model invocation, no new thread.
+// Startup is attach-only. Task creation is available only after an explicit user submission in the WebUI.
 async function main(){
   const threadId=process.env.CODEX_DESKTOP_THREAD_ID;
   if(!threadId||!/^[-a-zA-Z0-9_]{1,128}$/.test(threadId))throw new Error('Set CODEX_DESKTOP_THREAD_ID to the existing desktop task to attach.');
@@ -22,7 +23,12 @@ async function main(){
   const config=new ProtectedConfigStore(path.join(dataDir,'config.json'));
   await config.save({enabled:true,transport:{type:'unix',endpoint},maxConcurrentTurns:1,projects:[{id:'desktop',name:'桌面当前任务',root,grants:[]}]});
   const port=Number(process.env.CODEX_WEBUI_PORT||3210);
-  const runtime=await createApp({host:'127.0.0.1',port,dataDir,origin:`http://127.0.0.1:${port}`,secureCookies:false},(c,r)=>new DesktopSessionService(c,r,desktop));
+  const toolsEndpoint=process.env.CODEX_APP_TOOLS_PIPE_PATH;
+  const tools=toolsEndpoint?new DesktopTools(toolsEndpoint,()=>{
+    const state=desktop.state,h=state?.turnHistory?.history;const turns=h?(h.islands||[]).flatMap((island:any)=>(island.entries||[]).map((entry:any)=>h.entitiesByKey?.[entry.value])).filter(Boolean):state?.turns||[];
+    return {threadId:desktop.threadId,turnId:turns.at(-1)?.turnId||turns.at(-1)?.id||''};
+  }):undefined;
+  const runtime=await createApp({host:'127.0.0.1',port,dataDir,origin:`http://127.0.0.1:${port}`,secureCookies:false},(c,r)=>new DesktopWorkspaceService(c,r,desktop,tools,path.join(dataDir,'desktop-tasks.json')));
   await runtime.service.connect();
   const server=runtime.app.listen(port,'127.0.0.1');
   server.on('error',()=>{runtime.close();console.error('Could not listen on the requested port.');process.exitCode=1;});
