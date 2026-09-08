@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import {MessageChannel} from 'node:worker_threads';
+import {RpcTarget,newMessagePortRpcSession} from 'capnweb';
 import http from 'node:http';
 import {WebSocketServer} from 'ws';
 import {DesktopBridge} from '../src/backend/desktop-bridge';
@@ -12,14 +14,23 @@ test('desktop bridge batch: local-only transport, structured RPC, public events,
   const window:any={addEventListener:(_name:string,fn:any)=>listeners.add(fn),removeEventListener:(_name:string,fn:any)=>listeners.delete(fn)};
   function notify(data:any){for(const fn of [...listeners])fn({source:null,data});}
   window.electronBridge={async sendMessageFromView(m:any){sent.push(m);if(m.type==='mcp-request'){const {method,id}=m.request;notify({type:'mcp-response',hostId:'local',message:{id,...(method==='feedback/upload'?{error:{message:'SECRET'}}:{result:{data:[],ok:true}})}});}else notify({type:'fetch-response',requestId:m.requestId,responseType:'success',status:200,body:{threadIds:[]}});}};
-  const context=vm.createContext({window,Set,JSON,Promise,setTimeout,clearTimeout});
+  const appCalls:any[]=[];let hostStub:any;
+  const projects=new class extends RpcTarget {getLocalProjectsForRenderer(){return {saved:{id:'saved',name:'Native project',rootPaths:['/project']}};}createLocal(p:any){appCalls.push(p);if(p.name==='reject')throw new Error('SECRET_NATIVE_PROJECT_ERROR');return {projectId:'saved',rootPaths:p.sources};}};
+  const assignments=new class extends RpcTarget {setAssignment(p:any){appCalls.push(p);}};
+  window.location={origin:'app://-'};window.postMessage=(m:any)=>{assert.equal(m.type,'connect-app-host');hostStub=newMessagePortRpcSession(m.port as any,{services:{projects,threadProjectAssignments:assignments}});};
+  const context=vm.createContext({window,Set,JSON,Promise,MessageChannel,Error,setTimeout,clearTimeout});
   wss.on('connection',ws=>{socket=ws;ws.on('message',async raw=>{const m=JSON.parse(raw.toString());try{let result:any={};if(m.method==='Runtime.addBinding')window[m.params.name]=(payload:string)=>ws.send(JSON.stringify({method:'Runtime.bindingCalled',params:{name:m.params.name,payload}}));if(m.method==='Runtime.evaluate')result={result:{value:await vm.runInContext(m.params.expression,context)}};ws.send(JSON.stringify({id:m.id,result}));}catch{ws.send(JSON.stringify({id:m.id,result:{exceptionDetails:{text:'failed'}}}));}});});
   const bridge=new DesktopBridge((server.address() as any).port);
   try{await bridge.connect();assert.equal(bridge.available,true);await bridge.rpc('skills/list',{cwds:['test']});await bridge.host('list-pinned-threads',{});await assert.rejects(bridge.rpc('config/read',{}),/不允许/);await assert.rejects(bridge.host('set-global-state',{}),/不允许/);await assert.rejects(bridge.rpc('feedback/upload',{}),e=>!String(e).includes('SECRET'));
+    const native=await bridge.app('projects.list',{});assert.equal(native.saved.name,'Native project');
+    const created=await bridge.app('projects.create',{name:'New',root:'/project'});assert.equal(created.projectId,'saved');assert.deepEqual(appCalls[0],{appearance:null,initializeDefaultWorkspaceGitRepository:false,name:'New',sources:['/project']});
+    await bridge.app('threads.assignProject',{threadId:'task',projectId:'saved'});assert.deepEqual(appCalls[1],{threadId:'task',assignment:{projectKind:'local',projectId:'saved'}});
+    await assert.rejects(bridge.app('projects.removeLocal',{}),/不允许/);await assert.rejects(bridge.rpc('project/create',{}),/不允许/);await assert.rejects(bridge.host('get-global-state',{key:'unrelated-secret'}),/不允许/);
+    await assert.rejects(bridge.app('projects.create',{name:'reject',root:'/project'}),e=>!String(e).includes('SECRET'));
     const events:any[]=[];const unwatch=await bridge.watch('task',e=>events.push(e));
     for(const [threadId,type] of [['other','agentMessage'],['task','reasoning'],['task','agentMessage']])notify({type:'mcp-notification',hostId:'local',method:'item/started',params:{threadId,turnId:'turn',item:{id:'item',type,text:'public',secret:'private',encrypted_content:'NEVER_FORWARD'}}});
     await new Promise(r=>setTimeout(r,30));assert.equal(events.length,1);assert.equal(events[0].params.item.text,'public');assert.ok(!JSON.stringify(events).includes('private'));assert.ok(!JSON.stringify(events).includes('NEVER_FORWARD'));unwatch();assert.ok(sent.every(m=>m.type==='mcp-request'||m.type==='fetch'));
-  }finally{bridge.close();socket?.terminate();wss.close();await new Promise<void>(r=>server.close(()=>r()));}
+  }finally{bridge.close();hostStub?.[Symbol.dispose]();socket?.terminate();wss.close();await new Promise<void>(r=>server.close(()=>r()));}
 });
 test('ownerless desktop task batch: attach/resume without sending, delta/status/settings, follower input, disconnect',async()=>{
   const calls:any[]=[];let listener:(e:any)=>void=()=>{};let unwatched=false;

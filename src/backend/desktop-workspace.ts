@@ -21,11 +21,11 @@ interface KnownTask {id:string;projectId:string;title:string;status:string;updat
 export class DesktopWorkspaceService extends CodexConsoleService {
   private attached=new Map<string,DesktopSessionService>();private desktopOpening=new Map<string,Promise<DesktopSessionService>>();
   private known=new Map<string,KnownTask>();private creations=new Map<string,Creation>();private creating=new Map<string,Promise<Creation>>();
-  private projectWrites=new Map<string,string>();
+  private projectWrites=new Map<string,string>();private projectCreationQueue:Promise<unknown>=Promise.resolve();
   private submissions=new Map<string,{fingerprint:string;promise:Promise<any>}>();
   private savedProjects:any[]=[];private management=false;private initialized=false;private flushing=Promise.resolve();
   private featureCatalogs=new Map<string,{at:number,value:Promise<Catalog>}>();
-  private bridgeProjects:any[]=[];private projectlessRoot='';private projectRefresh?:Promise<void>;private projectRefreshAt=0;
+  private bridgeProjects:any[]=[];private desktopSavedProjects:any[]=[];private projectlessRoot='';private projectRefresh?:Promise<void>;private projectRefreshAt=0;
   constructor(config:ConfigStore,receipts:CommandReceipts,readonly anchor:DesktopIpc,readonly tools:DesktopTaskTools|undefined,readonly stateFile:string,private makeSession=(ipc:DesktopIpc)=>new DesktopSessionService(config,receipts,ipc),private makeIpc=(id:string)=>new DesktopIpc(anchor.endpoint,id),readonly bridge?:DesktopBridgeApi){
     super(config,receipts);this.addSession(this.newSession(anchor));
   }
@@ -45,7 +45,7 @@ export class DesktopWorkspaceService extends CodexConsoleService {
   override get hasActiveWork(){return [...this.attached.values()].some(s=>s.hasActiveWork);}
   override status(identity:Identity):any{
     const base=this.attached.get(this.anchor.threadId)!.status(identity),native=!!this.bridge?.available;
-    return {...base,connected:[...this.attached.values()].some(s=>s.desktop.connected),capabilities:{...base.capabilities,switchThreads:native||this.management,createWithMessage:(native||this.management)&&identity.elevated,projects:native&&identity.elevated,projectless:native&&identity.elevated,extensions:native,mcp:native,quota:native,resetQuota:native,setGoal:native,taskActions:native,firstMessageExtensions:native},creationMode:native?'desktop-native':'desktop-current-directory'};
+    return {...base,connected:[...this.attached.values()].some(s=>s.desktop.connected),capabilities:{...base.capabilities,switchThreads:native||this.management,createWithMessage:(native||this.management)&&identity.elevated,projects:native&&!!this.bridge?.app&&identity.elevated,projectless:native&&identity.elevated,extensions:native,mcp:native,quota:native,resetQuota:native,setGoal:native,taskActions:native,firstMessageExtensions:native},creationMode:native?'desktop-native':'desktop-current-directory'};
   }
   override project(identity:Identity,id:string,capability:'view'|'send'|'approve'|'files'='view'):Project{
     if(id==='projectless'){requireAdmin(identity);if(!this.config.value.enabled||!this.bridge?.available||!this.projectlessRoot)throw new ConsoleError(503,'PROJECTLESS_UNAVAILABLE','无项目对话接口尚未连接。');if(capability==='files')throw new ConsoleError(403,'PROJECTLESS_FILES','无项目对话不开放项目文件浏览。');return {id,name:'无项目对话',root:this.projectlessRoot,grants:[]};}
@@ -53,7 +53,7 @@ export class DesktopWorkspaceService extends CodexConsoleService {
   }
   override projects(identity:Identity):any[]{
     const native=!!this.bridge?.available;
-    const rows=super.projects(identity).filter(p=>p.id!=='projectless').map(project=>({...project,kind:'project',desktopProjectId:this.config.value.projects.find(p=>p.id===project.id)?.desktopProjectId,canCreateTask:identity.elevated&&(native||this.management&&this.savedProjects.some(p=>p.projectKind==='local'&&typeof p.path==='string'&&path.resolve(p.path)===project.root)),creationEnvironment:'local'}));
+    const rows=super.projects(identity).filter(p=>p.id!=='projectless').map(project=>({...project,kind:'project',desktopProjectId:this.config.value.projects.find(p=>p.id===project.id)?.desktopProjectId,desktopSavedProjectId:this.config.value.projects.find(p=>p.id===project.id)?.desktopSavedProjectId,canCreateTask:identity.elevated&&(native?!!this.config.value.projects.find(p=>p.id===project.id)?.desktopSavedProjectId:this.management&&this.savedProjects.some(p=>p.projectKind==='local'&&typeof p.path==='string'&&path.resolve(p.path)===project.root)),creationEnvironment:'local'}));
     if(native&&identity.elevated&&this.projectlessRoot)rows.push({id:'projectless',name:'无项目对话',root:'',permissions:{view:true,send:true,approve:true,files:false},activeCount:0,kind:'projectless',desktopProjectId:undefined,canCreateTask:true,creationEnvironment:'local'});
     return rows;
   }
@@ -61,31 +61,61 @@ export class DesktopWorkspaceService extends CodexConsoleService {
   private async syncDesktopProjects(force=false){
     if(this.projectRefresh){await this.projectRefresh;if(!force)return;}if(!force&&Date.now()-this.projectRefreshAt<10000)return;
     const work=(async()=>{
-      const result=await this.bridge!.rpc('project/list',{limit:100});this.bridgeProjects=result.data||[];
-      const projects=this.config.value.projects.map(p=>({...p}));let changed=false;
-      for(const p of this.bridgeProjects){if(!validId(p.id)||typeof p.name!=='string')continue;
-        for(const root of p.roots||[]){if(typeof root.path!=='string')continue;const canonical=await fs.realpath(root.path).catch(()=>null);if(!canonical)continue;
-          const prior=projects.find(v=>v.root===canonical);if(prior){if(prior.desktopProjectId!==p.id||prior.name!==p.name){Object.assign(prior,{desktopProjectId:p.id,name:p.name.slice(0,100)});changed=true;}continue;}
-          const entry={id:'p-'+createHash('sha256').update(p.id+canonical).digest('hex').slice(0,20),name:p.name.slice(0,100),root:canonical,grants:[],desktopProjectId:p.id};
-          try{await validateConfig({...this.config.value,projects:[...projects,entry]});const privateDir=path.dirname(this.config.file);if(isWithin(canonical,privateDir)||isWithin(privateDir,canonical))continue;projects.push(entry);changed=true;}catch{/* Inaccessible, overlapping and private roots are not exposed. */}
+      const backend:any[]=[];let cursor:string|undefined;
+      for(let page=0;page<20;page++){const result=await this.bridge!.rpc('project/list',{limit:100,...(cursor?{cursor}:{})});backend.push(...(result.data||[]));if(!result.nextCursor)break;if(result.nextCursor===cursor||page===19)throw new ConsoleError(502,'PROJECT_LIST_INCOMPLETE','桌面项目列表未完整返回。');cursor=result.nextCursor;}
+      this.bridgeProjects=backend;
+      if(!this.bridge!.app)throw new ConsoleError(503,'DESKTOP_PROJECTS_UNAVAILABLE','桌面已保存项目接口不可用。');
+      const [saved,mapping]=await Promise.all([this.bridge!.app('projects.list',{}),this.bridge!.host('get-global-state',{key:'app-server-project-id-by-legacy-project-id-by-host'})]);
+      if(!saved||typeof saved!=='object'||Array.isArray(saved))throw new ConsoleError(502,'PROJECT_SYNC_FAILED','桌面已保存项目列表无效。');
+      this.desktopSavedProjects=Object.values(saved).filter((p:any)=>validId(p.id)&&typeof p.name==='string'&&Array.isArray(p.rootPaths));
+      const maps=Object.values(mapping?.value||{}).filter((m:any)=>m&&typeof m==='object') as Record<string,string>[];
+      const projects=this.config.value.projects.map(p=>{const copy={...p};delete copy.desktopSavedProjectId;return copy;});
+      for(const savedProject of this.desktopSavedProjects){
+        const mappedIds=new Set(maps.map(m=>m[savedProject.id]).filter(validId));
+        for(const root of savedProject.rootPaths){if(typeof root!=='string')continue;const canonical=await fs.realpath(root).catch(()=>null);if(!canonical)continue;
+          const matches=[];for(const p of backend){if(!validId(p.id))continue;for(const r of p.roots||[])if(typeof r.path==='string'&&await fs.realpath(r.path).catch(()=>null)===canonical){matches.push(p);break;}}
+          const mapped=matches.filter(p=>mappedIds.has(p.id)||p.id===savedProject.id),chosen=mapped.length===1?mapped[0]:mapped.length===0&&matches.length===1?matches[0]:null;
+          if(!chosen)continue;
+          const prior=projects.find(p=>p.root===canonical);
+          if(prior){if(prior.desktopSavedProjectId&&prior.desktopSavedProjectId!==savedProject.id)continue;Object.assign(prior,{name:savedProject.name.slice(0,100),desktopProjectId:chosen.id,desktopSavedProjectId:savedProject.id});continue;}
+          const entry={id:'p-'+createHash('sha256').update(chosen.id+canonical).digest('hex').slice(0,20),name:savedProject.name.slice(0,100),root:canonical,grants:[],desktopProjectId:chosen.id,desktopSavedProjectId:savedProject.id};
+          try{await validateConfig({...this.config.value,projects:[...projects,entry]});const privateDir=path.dirname(this.config.file);if(isWithin(canonical,privateDir)||isWithin(privateDir,canonical))continue;projects.push(entry);}catch{/* Never expose overlapping or private roots. */}
         }
       }
-      if(changed)await this.config.save({...this.config.value,projects});
+      if(JSON.stringify(projects)!==JSON.stringify(this.config.value.projects))await this.config.save({...this.config.value,projects});
       const root=await this.bridge!.host('projectless-workspace-root',{}).catch(()=>null);
       if(typeof root?.workspaceRoot==='string')this.projectlessRoot=await fs.realpath(root.workspaceRoot).catch(()=>path.resolve(root.workspaceRoot));
       this.projectRefreshAt=Date.now();
     })();this.projectRefresh=work;try{await work;}finally{this.projectRefresh=undefined;}
   }
   override async createProject(identity:Identity,input:any){
-    requireAdmin(identity);if(!this.bridge?.available)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','桌面项目接口未连接。');
+    requireAdmin(identity);if(!this.bridge?.available||!this.bridge.app)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','桌面已保存项目接口未连接。');
     const prepared=await prepareProjectDirectory(this.config,input),canonical=prepared.root;
-    return this.receipts.run(identity.uuid+':project:'+input.requestId,async()=>{
+    return this.receipts.run(identity.uuid+':project:'+input.requestId,()=>{const work=this.projectCreationQueue.catch(()=>{}).then(async()=>{
       await materializeProjectDirectory(this.config,prepared,input.name.trim());
-      const entry={id:'p-'+createHash('sha256').update(canonical).digest('hex').slice(0,20),name:input.name.trim(),root:canonical,grants:[]};
-      const result=await this.bridge!.rpc('project/create',{name:entry.name,roots:[{path:canonical}],idempotencyKey:identity.uuid+':'+input.requestId});
-      if(!validId(result.project?.id))throw new ConsoleError(502,'PROJECT_OUTCOME_UNKNOWN','桌面项目创建结果未知，请刷新项目列表检查。');
-      await this.syncDesktopProjects(true);const selected=this.projects(identity).find(p=>p.root===canonical);if(!selected)throw new ConsoleError(502,'PROJECT_SYNC_FAILED','项目已创建，但尚未同步到网页，请刷新项目列表。');return selected;
-    });
+      await this.syncDesktopProjects(true);
+      const prior=this.config.value.projects.find(p=>p.root===canonical);
+      if(!prior?.desktopSavedProjectId){
+        const result=await this.bridge!.app!('projects.create',{name:input.name.trim(),root:canonical});
+        if(!validId(result?.projectId)||!Array.isArray(result.rootPaths)||!result.rootPaths.some((r:any)=>typeof r==='string'&&path.resolve(r)===canonical))throw new ConsoleError(502,'PROJECT_OUTCOME_UNKNOWN','桌面项目创建结果未知，请刷新项目列表检查。');
+        await this.syncDesktopProjects(true);
+        const registered=this.config.value.projects.find(p=>p.root===canonical&&p.desktopSavedProjectId===result.projectId);
+        if(!registered?.desktopProjectId)throw new ConsoleError(502,'PROJECT_SYNC_FAILED','项目未能同步到桌面项目列表，未创建聊天。');
+      }
+      const registered=this.config.value.projects.find(p=>p.root===canonical)!;
+      // Only repair tasks previously created by this WebUI in this exact project. No new tasks/turns.
+      for(const row of this.creations.values())if(row.threadId&&row.projectId===registered.id){
+        const reply=await this.bridge!.rpc('thread/read',{threadId:row.threadId,includeTurns:false});const t=reply.thread;
+        if(t?.id!==row.threadId||typeof t.cwd!=='string'||await fs.realpath(t.cwd).catch(()=>null)!==canonical||!this.bridgeProjects.some(p=>p.id===t.projectId&&(p.roots||[]).some((r:any)=>typeof r.path==='string'&&path.resolve(r.path)===canonical)))continue;
+        await this.assignDesktopProject(registered,t.id,t.projectId);
+      }
+      return this.projects(identity).find(p=>p.id===registered.id);
+    });this.projectCreationQueue=work;return work;});
+  }
+  private async assignDesktopProject(project:Project,threadId:string,currentProjectId?:string){
+    if(!project.desktopProjectId||!project.desktopSavedProjectId||!this.bridge?.app)throw new ConsoleError(409,'DESKTOP_PROJECT_NOT_REGISTERED','该目录尚未保存为桌面项目，请先添加项目。');
+    if(currentProjectId!==project.desktopProjectId)await this.bridge.rpc('thread/metadata/update',{threadId,projectId:project.desktopProjectId});
+    await this.bridge.app('threads.assignProject',{threadId,projectId:project.desktopSavedProjectId});
   }
   private async session(identity:Identity,projectId:string,id:string){
     const project=this.project(identity,projectId);if(!validId(id))throw new ConsoleError(400,'INVALID_THREAD','无效的任务 ID。');
@@ -186,7 +216,9 @@ export class DesktopWorkspaceService extends CodexConsoleService {
     if(input.extensions!==undefined&&(!Array.isArray(input.extensions)||input.extensions.length>12))throw new ConsoleError(400,'INVALID_EXTENSIONS','最多选择 12 个技能或插件。');
     if(input.extensions?.length)content.push(...resolveExtensions(await this.featureCatalog(project.root,true),input.extensions));
     if(projectId!=='projectless'&&await fs.realpath(project.root).catch(()=>null)!==project.root)throw new ConsoleError(409,'ROOT_CHANGED','项目目录已改变，请重新选择。');
-    const start:any={threadSource:'user',projectId:projectId==='projectless'?null:project.desktopProjectId||null};
+    if(projectId!=='projectless'){await this.syncDesktopProjects(true);Object.assign(project,this.project(identity,projectId,'send'));if(!this.project(identity,projectId).desktopSavedProjectId)delete project.desktopSavedProjectId;}
+    if(projectId!=='projectless'&&(!project.desktopProjectId||!project.desktopSavedProjectId))throw new ConsoleError(409,'DESKTOP_PROJECT_NOT_REGISTERED','该目录尚未保存为桌面项目，请先添加项目；不会改成无项目聊天发送。');
+    const start:any={threadSource:'user',ephemeral:false,projectId:projectId==='projectless'?null:project.desktopProjectId};
     if(overrides.includes('model')||overrides.includes('effort')){const {data}=await this.models(identity);const model=data.find((m:any)=>m.model===input.model);if(!model)throw new ConsoleError(400,'MODEL_UNAVAILABLE','请选择桌面目录中的模型。');if(input.effort&&!model.supportedReasoningEfforts.some((r:any)=>r.reasoningEffort===input.effort))throw new ConsoleError(400,'EFFORT_UNAVAILABLE','此模型不支持该推理强度。');start.model=model.model;}
     if(overrides.includes('mode')&&!['code','plan'].includes(input.mode))throw new ConsoleError(400,'INVALID_MODE','无效的协作模式。');
     let turnOverrides:any={};if(overrides.includes('access')){if(!['default','read-only','full'].includes(input.access))throw new ConsoleError(400,'INVALID_ACCESS','无效的访问权限。');if(input.access==='full'&&input.confirmFullAccess!==true)throw new ConsoleError(400,'ACCESS_CONFIRMATION_REQUIRED','请确认完全访问权限。');turnOverrides.sandboxPolicy=input.access==='full'?{type:'dangerFullAccess'}:input.access==='read-only'?{type:'readOnly'}:{type:'workspaceWrite',writableRoots:[project.root]};turnOverrides.approvalPolicy=input.access==='full'?'never':'on-request';turnOverrides.approvalsReviewer='user';}if(overrides.includes('effort'))turnOverrides.effort=input.effort||null;if(overrides.includes('model'))turnOverrides.model=start.model;if(overrides.includes('mode'))turnOverrides.collaborationMode={mode:input.mode==='plan'?'plan':'default',settings:{model:start.model||null,reasoning_effort:input.effort||null,developer_instructions:null}};
@@ -199,6 +231,7 @@ export class DesktopWorkspaceService extends CodexConsoleService {
       if(!validId(t?.id)||await fs.realpath(t.cwd)!==await fs.realpath(cwd))throw new Error('Unexpected created task');
       row.threadId=t.id;row.status='ready';row.messageAccepted=false;
       this.known.set(t.id,{id:t.id,projectId,title:input.text.trim().slice(0,60),cwd:t.cwd,status:'idle',updatedAt:Date.now()});await this.save();
+      if(projectId!=='projectless')await this.assignDesktopProject(project,t.id,t.projectId);
       if(turnOverrides.sandboxPolicy?.type==='workspaceWrite')turnOverrides.sandboxPolicy.writableRoots=[cwd];
       if(turnOverrides.collaborationMode){turnOverrides.collaborationMode.settings.model ||= created.model;turnOverrides.collaborationMode.settings.reasoning_effort ||= created.reasoningEffort||null;}
       // Persist an ambiguous-send marker before the sole first-turn call. No automatic replay.

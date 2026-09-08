@@ -1,20 +1,23 @@
 import WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
 import { ConsoleError } from './config';
+import { DesktopAppSession } from './desktop-app-session';
 export interface DesktopBridgeApi {
   available:boolean;
   connect():Promise<void>;
   rpc(method:string,params:any):Promise<any>;
   host(route:string,params:any):Promise<any>;
+  app?(method:string,params:any):Promise<any>;
   watch?(threadId:string,listener:(event:any)=>void):Promise<()=>void>;
   close():void;
 }
-const rpcMethods=new Set(['skills/list','plugin/installed','mcpServerStatus/list','account/rateLimits/read','account/rateLimitResetCredit/consume','project/list','project/create','turn/start','turn/interrupt','thread/compact/start','thread/start','thread/resume','thread/read','thread/list','thread/turns/list','thread/goal/get','thread/goal/set','thread/name/set','thread/archive','thread/fork','review/start','feedback/upload']);
-const hostRoutes=new Set(['projectless-thread-cwd','projectless-workspace-root','set-thread-pinned','list-pinned-threads']);
+const rpcMethods=new Set(['skills/list','plugin/installed','mcpServerStatus/list','account/rateLimits/read','account/rateLimitResetCredit/consume','project/list','thread/metadata/update','turn/start','turn/interrupt','thread/compact/start','thread/start','thread/resume','thread/read','thread/list','thread/turns/list','thread/goal/get','thread/goal/set','thread/name/set','thread/archive','thread/fork','review/start','feedback/upload']);
+const hostRoutes=new Set(['get-global-state','projectless-thread-cwd','projectless-workspace-root','set-thread-pinned','list-pinned-threads']);
 /** Opt-in attachment to the existing desktop's local debug endpoint. No browser/Codex process launch.
  * The HTTP service never accepts JavaScript, CDP methods, or arbitrary host routes from a client.
  */
 export class DesktopBridge implements DesktopBridgeApi {
+  private appSession?:DesktopAppSession;private appBindings=new Map<string,(payload:string)=>void>();
   available=false;private socket?:WebSocket;private next=0;
   private pending=new Map<number,{resolve:(v:any)=>void;reject:(e:Error)=>void;timer:NodeJS.Timeout}>();
   private listeners=new Map<string,Set<(event:any)=>void>>();
@@ -28,7 +31,7 @@ export class DesktopBridge implements DesktopBridgeApi {
     const url=new URL(target.webSocketDebuggerUrl);
     if(url.protocol!=='ws:'||!['127.0.0.1','localhost','[::1]'].includes(url.hostname)||url.port!==String(this.port))throw new Error('Non-local desktop bridge rejected');
     const socket=this.socket=new WebSocket(url,{maxPayload:8*1024*1024});
-    socket.on('message',raw=>{try{const m=JSON.parse(raw.toString());if(m.method==='Runtime.bindingCalled'&&m.params?.name===this.binding){const event=JSON.parse(m.params.payload);for(const fn of this.listeners.get(event.threadId)||[])fn(event);return;}const entry=this.pending.get(m.id);if(!entry)return;clearTimeout(entry.timer);this.pending.delete(m.id);m.error?entry.reject(new Error('Desktop bridge request failed')):entry.resolve(m.result);}catch{this.close();}});
+    socket.on('message',raw=>{try{const m=JSON.parse(raw.toString());if(m.method==='Runtime.bindingCalled'&&this.appBindings.has(m.params?.name)){this.appBindings.get(m.params.name)!(m.params.payload);return;}if(m.method==='Runtime.bindingCalled'&&m.params?.name===this.binding){const event=JSON.parse(m.params.payload);for(const fn of this.listeners.get(event.threadId)||[])fn(event);return;}const entry=this.pending.get(m.id);if(!entry)return;clearTimeout(entry.timer);this.pending.delete(m.id);m.error?entry.reject(new Error('Desktop bridge request failed')):entry.resolve(m.result);}catch{this.close();}});
     socket.on('close',()=>this.close());socket.on('error',()=>this.close());
     await new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{socket.close();reject(new Error('Desktop bridge timed out'));},5000);socket.once('open',()=>{clearTimeout(timer);resolve();});socket.once('error',()=>{clearTimeout(timer);reject(new Error('Desktop bridge unavailable'));});});
     const probe=await this.evaluate('Boolean(window.electronBridge?.sendMessageFromView)');
@@ -52,7 +55,12 @@ export class DesktopBridge implements DesktopBridgeApi {
     return ()=>{listeners.delete(listener);if(!listeners.size){this.listeners.delete(threadId);if(this.available)void this.evaluate('window['+JSON.stringify(this.binding+'_state')+']?.ids.delete('+JSON.stringify(threadId)+')').catch(()=>{});}};
   }
   async rpc(method:string,params:any){if(!rpcMethods.has(method))throw new ConsoleError(400,'DESKTOP_METHOD_DENIED','不允许的桌面操作。');return this.exchange('rpc',method,params);}
-  async host(route:string,params:any){if(!hostRoutes.has(route))throw new ConsoleError(400,'DESKTOP_METHOD_DENIED','不允许的桌面操作。');return this.exchange('host',route,params);}
+  async host(route:string,params:any){if(route==='get-global-state'&&!['app-server-project-id-by-legacy-project-id-by-host','thread-project-assignments'].includes(params?.key))throw new ConsoleError(400,'DESKTOP_METHOD_DENIED','不允许读取此桌面状态。');if(!hostRoutes.has(route))throw new ConsoleError(400,'DESKTOP_METHOD_DENIED','不允许的桌面操作。');return this.exchange('host',route,params);}
+  async app(method:string,params:any){
+    if(!this.available)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','桌面功能接口未连接。');
+    this.appSession ||= new DesktopAppSession(expression=>this.evaluate(expression),async(name,listener)=>{this.appBindings.set(name,listener);await this.cdp('Runtime.addBinding',{name});},name=>{this.appBindings.delete(name);if(this.socket?.readyState===WebSocket.OPEN)void this.cdp('Runtime.removeBinding',{name}).catch(()=>{});});
+    return this.appSession.call(method,params);
+  }
   private async exchange(kind:'rpc'|'host',method:string,params:any){
     if(!this.available)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','桌面功能接口未连接。');
     const request={kind,method,params,id:'webui-'+randomUUID()};
@@ -61,7 +69,7 @@ export class DesktopBridge implements DesktopBridgeApi {
     if(!reply?.ok)throw new ConsoleError(reply?.unknown?504:502,reply?.unknown?'DESKTOP_OUTCOME_UNKNOWN':'DESKTOP_BRIDGE_REJECTED',reply?.unknown?'桌面操作超时，结果未知；请检查桌面，不要重复提交。':'桌面未能完成此操作。');
     return reply.value;
   }
-  close(){if(this.watching&&this.socket?.readyState===WebSocket.OPEN)this.socket.send(JSON.stringify({id:++this.next,method:'Runtime.evaluate',params:{expression:'window['+JSON.stringify(this.binding+'_state')+']?.close()'}}));this.watching=false;for(const [id,listeners] of this.listeners)for(const fn of listeners)fn({threadId:id,method:'disconnect'});this.listeners.clear();this.available=false;const socket=this.socket;this.socket=undefined;for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','桌面功能连接已断开；写入结果可能未知。'));}this.pending.clear();if(socket){socket.removeAllListeners();socket.on('error',()=>{});socket.close();}}
+  close(){this.appSession?.close();this.appSession=undefined;this.appBindings.clear();if(this.watching&&this.socket?.readyState===WebSocket.OPEN)this.socket.send(JSON.stringify({id:++this.next,method:'Runtime.evaluate',params:{expression:'window['+JSON.stringify(this.binding+'_state')+']?.close()'}}));this.watching=false;for(const [id,listeners] of this.listeners)for(const fn of listeners)fn({threadId:id,method:'disconnect'});this.listeners.clear();this.available=false;const socket=this.socket;this.socket=undefined;for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','桌面功能连接已断开；写入结果可能未知。'));}this.pending.clear();if(socket){socket.removeAllListeners();socket.on('error',()=>{});socket.close();}}
 }
 
 /** Executed in the already-running desktop. Only bounded public events of explicitly attached tasks leave it. */

@@ -17,11 +17,14 @@ async function fixture(){
   const receipts=new CommandReceipts(path.join(data,'receipts.json'));await receipts.load();const calls:any[]=[];
   const threads=new Map<string,any>([['anchor',{id:'anchor',cwd:project,name:'Anchor',projectId:'project-1',status:{type:'idle'}}]]);
   const projects=[{id:'project-1',name:'Demo',roots:[{path:project}]},{id:'project-2',name:'Other',roots:[{path:other}]}];
+  const saved:any={'saved-1':{id:'saved-1',name:'Demo',rootPaths:[project]},'saved-2':{id:'saved-2',name:'Other',rootPaths:[other]}};
+  const projectMapping:any={local:{'saved-1':'project-1','saved-2':'project-2'}},assignments:any={};
   let n=0;const ipcs=new Map<string,any>();
   const makeIpc=(id:string)=>{const t=threads.get(id)!;const ipc:any=Object.assign(new EventEmitter(),{threadId:id,endpoint:'mock',connected:true,state:{cwd:t.cwd,title:t.name,threadRuntimeStatus:t.status,turns:[],latestThreadSettings:{model:'test',effort:'max'},currentPermissions:{sandboxPolicy:{type:'readOnly'},approvalPolicy:'never'}},async connect(){this.connected=true;},close(){this.connected=false;},async request(method:string,params:any,version:number){calls.push({method,params,version});return {result:{result:{turn:{id:'turn'}}}};}});ipcs.set(id,ipc);return ipc;};
-  const bridge:any={available:true,async connect(){this.available=true;},close(){this.available=false;},async host(method:string,params:any){calls.push({method,params});if(method==='projectless-workspace-root')return {workspaceRoot:projectless};if(method==='projectless-thread-cwd'){const cwd=path.join(projectless,'chat-'+(++n));await mkdir(cwd);return {cwd};}if(method==='list-pinned-threads')return {threadIds:[]};return {success:true};},async rpc(method:string,params:any){calls.push({method,params});switch(method){
+  const bridge:any={available:true,async connect(){this.available=true;},close(){this.available=false;},async app(method:string,params:any){calls.push({method,params});if(method==='projects.list')return saved;if(method==='projects.create'){const id='saved-'+(++n+2),backendId='project-'+(n+2);saved[id]={id,name:params.name,rootPaths:[params.root]};projectMapping.local[id]=backendId;projects.push({id:backendId,name:params.name,roots:[{path:params.root}]});return {projectId:id,rootPaths:[params.root]};}if(method==='threads.assignProject'){assignments[params.threadId]={projectKind:'local',projectId:params.projectId};return;}throw Error('Unexpected app method '+method);},async host(method:string,params:any){calls.push({method,params});if(method==='get-global-state')return {value:params.key==='thread-project-assignments'?assignments:projectMapping};if(method==='projectless-workspace-root')return {workspaceRoot:projectless};if(method==='projectless-thread-cwd'){const cwd=path.join(projectless,'chat-'+(++n));await mkdir(cwd);return {cwd};}if(method==='list-pinned-threads')return {threadIds:[]};return {success:true};},async rpc(method:string,params:any){calls.push({method,params});switch(method){
     case 'project/list':return {data:projects};
     case 'project/create':{const p={id:'project-'+(++n+2),name:params.name,roots:params.roots};projects.push(p);return {project:p};}
+    case 'thread/metadata/update':Object.assign(threads.get(params.threadId),{projectId:params.projectId});return {thread:threads.get(params.threadId)};
     case 'thread/read':return {thread:threads.get(params.threadId)};
     case 'thread/list':return {data:[...threads.values()]};
     case 'thread/turns/list':return {data:[]};
@@ -36,7 +39,7 @@ async function fixture(){
   }}};
   const make=()=>new DesktopWorkspaceService(config,receipts,makeIpc('anchor'),undefined,path.join(data,'tasks.json'),undefined,makeIpc,bridge);
   const service=make();service.models=async()=>({data:[{model:'test',supportedReasoningEfforts:[{reasoningEffort:'max'}]}]});await service.connect();
-  return {service,bridge,calls,config,threads,projects,ipcs,project,other,data,root,projectless,make};
+  return {service,bridge,calls,config,threads,projects,saved,projectMapping,assignments,ipcs,project,other,data,root,projectless,make};
 }
 const input=(requestId='native-request-1')=>({requestId,text:'hello from user',environment:'local',confirmCurrentDirectory:true,settingsOverrides:[],extensions:[]});
 test('native desktop imports projects and keeps projectless separate with administrator-only ACL',async()=>{
@@ -55,11 +58,51 @@ test('native lost turn response is persisted and never re-created or resent on r
   const f=await fixture();let other:any;try{const rpc=f.bridge.rpc.bind(f.bridge);f.bridge.rpc=async(m:string,p:any)=>{if(m==='turn/start'){f.calls.push({method:m,params:p});throw new ConsoleError(504,'DESKTOP_OUTCOME_UNKNOWN','timeout');}return rpc(m,p);};const a=await f.service.createTask(admin,'demo',input());assert.equal(a.messageAccepted,null);const b=await f.service.createTask(admin,'demo',input());assert.equal(b.threadId,a.threadId);other=f.make();await other.connect();await other.createTask(admin,'demo',input());assert.equal(f.calls.filter(c=>c.method==='thread/start').length,1);assert.equal(f.calls.filter(c=>c.method==='turn/start').length,1);}finally{other?.disconnect();f.service.disconnect();}
 });
 test('projects create from an existing or single new directory, persist imports, and reject private/overlap paths',async()=>{
-  const f=await fixture();try{const target=path.join(f.root,'new-project');const p=await f.service.createProject(admin,{name:'New',root:target,createDirectory:true,confirmDirectory:true,requestId:'project-request-1'});assert.equal(p.root,target);assert.ok(f.config.value.projects.some(v=>v.root===target));await f.service.createProject(admin,{name:'New',root:target,createDirectory:true,confirmDirectory:true,requestId:'project-request-1'});assert.equal(f.calls.filter(c=>c.method==='project/create').length,1);await assert.rejects(f.service.createProject(admin,{name:'Bad',root:path.join(f.data,'secret'),createDirectory:true,confirmDirectory:true,requestId:'project-request-2'}),/私有/);}finally{f.service.disconnect();}
+  const f=await fixture();try{const target=path.join(f.root,'new-project');const p=await f.service.createProject(admin,{name:'New',root:target,createDirectory:true,confirmDirectory:true,requestId:'project-request-1'});assert.equal(p.root,target);assert.ok(f.config.value.projects.some(v=>v.root===target));await f.service.createProject(admin,{name:'New',root:target,createDirectory:true,confirmDirectory:true,requestId:'project-request-1'});assert.equal(f.calls.filter(c=>c.method==='projects.create').length,1);await assert.rejects(f.service.createProject(admin,{name:'Bad',root:path.join(f.data,'secret'),createDirectory:true,confirmDirectory:true,requestId:'project-request-2'}),/私有/);}finally{f.service.disconnect();}
 });
 test('slash actions use native operations, require confirmation, and never send model text for rename/pin/fork',async()=>{
   const f=await fixture();try{await assert.rejects(f.service.taskAction(admin,'demo','anchor','review',{requestId:'action-request-1',target:'uncommittedChanges'}),/确认/);for(const kind of ['rename','pin','fork','side','compact','review','feedback']){const result=await f.service.taskAction(admin,'demo','anchor',kind,{requestId:'action-request-'+kind,confirmed:true,name:'Renamed',pinned:true,target:'baseBranch',branch:'main',reason:'test feedback'});assert.equal(result.ok,true);}assert.ok(f.calls.some(c=>c.method==='thread/name/set'&&c.params.name==='Renamed'));assert.ok(f.calls.some(c=>c.method==='set-thread-pinned'));assert.ok(f.calls.some(c=>c.method==='thread-follower-compact-thread'));assert.ok(f.calls.some(c=>c.method==='review/start'&&c.params.delivery==='inline'));assert.ok(f.calls.some(c=>c.method==='thread/fork'&&c.params.ephemeral===true&&c.params.deferGoalContinuation===true));assert.ok(!f.calls.some(c=>c.method==='turn/start'));const feedback=f.calls.find(c=>c.method==='feedback/upload');assert.equal(feedback.params.includeLogs,false);assert.deepEqual(feedback.params.extraLogFiles,[]);assert.deepEqual((await f.service.mcp(admin,'demo','anchor')).data[0].tools,['search']);}finally{f.service.disconnect();}
 });
 test('existing desktop sends selected skills/plugins through actual follower input, not text-only substitution',async()=>{
   const f=await fixture();try{const c=await f.service.extensions(admin,'demo');await f.service.send(admin,'demo','anchor',{...input(),extensions:c.entries.map((e:any)=>e.id)});const call=f.calls.find(c=>c.method==='thread-follower-start-turn');assert.deepEqual(call.params.turnStart.request.input.map((i:any)=>i.type),['text','skill','mention']);assert.equal(call.params.turnStart.context.inheritThreadSettings,true);}finally{f.service.disconnect();}
+});
+
+test('desktop project registration batch: two ID spaces, native saved list, repeated add, and explicit task assignment',async()=>{
+  const f=await fixture();try{
+    const p=await f.service.createProject(admin,{name:'Saved in desktop',root:f.other,confirmDirectory:true,requestId:'already-saved-01'});
+    assert.equal(p.desktopProjectId,'project-2');assert.equal(p.desktopSavedProjectId,'saved-2');assert.equal(f.calls.filter(c=>c.method==='projects.create').length,0);
+    const target=path.join(f.root,'registered');const body={name:'Registered',root:target,createDirectory:true,confirmDirectory:true,requestId:'create-saved-01'};
+    const added=await f.service.createProject(admin,body);await f.service.createProject(admin,body);
+    assert.equal(Object.values(f.saved).filter((p:any)=>p.rootPaths.includes(target)).length,1);assert.equal(f.calls.filter(c=>c.method==='projects.create').length,1);assert.ok(!f.calls.some(c=>['project/create','thread/start','turn/start'].includes(c.method)));
+    const created=await f.service.createTask(admin,added.id,input('saved-task-01'));const start=f.calls.find(c=>c.method==='thread/start')!;
+    assert.equal(start.params.projectId,added.desktopProjectId);assert.equal(start.params.ephemeral,false);
+    assert.equal(f.assignments[created.threadId].projectId,added.desktopSavedProjectId);assert.equal(f.assignments[created.threadId].projectKind,'local');
+    assert.ok(f.calls.findIndex(c=>c.method==='threads.assignProject')<f.calls.findIndex(c=>c.method==='turn/start'));
+  }finally{f.service.disconnect();}
+});
+test('database-only projects are not treated as desktop saved projects and never fall back to projectless',async()=>{
+  const f=await fixture();try{
+    delete f.saved['saved-1'];
+    await assert.rejects(f.service.createTask(admin,'demo',input('deleted-saved-project-01')),/桌面项目/);
+    const p=f.service.projects(admin).find(p=>p.id==='demo')!;assert.equal(p.canCreateTask,false);assert.equal(p.desktopSavedProjectId,undefined);
+    await assert.rejects(f.service.createTask(admin,'demo',input('orphan-task-01')),/桌面项目/);assert.ok(!f.calls.some(c=>['thread/start','turn/start','projectless-thread-cwd'].includes(c.method)));
+  }finally{f.service.disconnect();}
+});
+test('repair registration preserves the existing task and only migrates WebUI-created task assignments',async()=>{
+  const f=await fixture();try{
+    const created=await f.service.createTask(admin,'demo',input('old-desktop-task-01'));const id=created.threadId;
+    delete f.saved['saved-1'];await (f.service as any).syncDesktopProjects(true);f.calls.length=0;
+    const p=await f.service.createProject(admin,{name:'Restored project',root:f.project,confirmDirectory:true,requestId:'repair-project-01'});
+    assert.notEqual(p.desktopProjectId,'project-1');assert.equal(f.threads.get(id)?.projectId,p.desktopProjectId);assert.equal(f.assignments[id].projectId,p.desktopSavedProjectId);assert.equal(f.threads.get('anchor')?.projectId,'project-1');
+    assert.equal(f.calls.filter(c=>c.method==='threads.assignProject').length,1);assert.ok(!f.calls.some(c=>['thread/start','turn/start','thread/archive'].includes(c.method)));
+  }finally{f.service.disconnect();}
+});
+test('native project assignment failure stops the first message; unsaved and mismatched desktop responses do not report success',async()=>{
+  const f=await fixture();try{
+    const app=f.bridge.app;f.bridge.app=async(m:string,p:any)=>{if(m==='threads.assignProject')throw Error('assignment rejected');return app(m,p);};
+    await Promise.allSettled([f.service.createTask(admin,'demo',input('assignment-failure-01'))]);assert.equal(f.calls.filter(c=>c.method==='thread/start').length,1);assert.equal(f.calls.filter(c=>c.method==='turn/start').length,0);
+    f.bridge.app=async(m:string,p:any)=>m==='projects.create'?{projectId:'not-saved',rootPaths:[p.root]}:app(m,p);
+    await assert.rejects(f.service.createProject(admin,{name:'Not saved',root:path.join(f.root,'not-saved'),createDirectory:true,confirmDirectory:true,requestId:'false-project-01'}),/同步/);
+    assert.equal(f.calls.filter(c=>c.method==='turn/start').length,0);
+  }finally{f.service.disconnect();}
 });
