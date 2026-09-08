@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 const S = { user:null, csrf:'', projects:[], models:[], project:null, thread:null, threads:[], next:null,
   items:new Map(), pending:new Map(), status:'idle', cursor:'', stream:null, epoch:0, retry:0,
   timer:null, hiddenTimer:null, renderTimer:null, nodes:new Map(), attachments:[], bytes:0, truncated:false,
-  connected:false, panel:'quota', filePath:'.', syncing:null, sending:false, attempt:null };
+  connected:false, panel:'quota', filePath:'.', syncing:null, sending:false, attempt:null, creationId:null };
 const bytes = n => n < 1024 ? `${n} B` : n < 1048576 ? `${(n/1024).toFixed(1)} KiB` : `${(n/1048576).toFixed(1)} MiB`;
 const date = v => v ? new Date(v < 1e12 ? v*1000 : v).toLocaleString('zh-CN', { hour12:false }) : '未知';
 const stateName = v => ({idle:'待命',running:'运行中',inProgress:'运行中',completed:'已完成',interrupted:'已停止',failed:'失败',notLoaded:'未加载',active:'运行中',systemError:'错误'})[v] || v;
@@ -33,13 +33,13 @@ const q = params => new URLSearchParams(params).toString();
 const apiProject = (route, extra={}) => `/api/codex/${route}?${q({projectId:S.project?.id||'',...extra})}`;
 function permission(name) { return !!S.project?.permissions?.[name]; }
 function closeStream() { clearTimeout(S.timer); S.timer=null; S.stream?.close(); S.stream=null; }
-function clearConversation() { S.epoch++; closeStream(); clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='准备好，开始你的下一步。'; $('prompt').value=''; renderAttachments(); controls(); }
+function clearConversation() { S.epoch++; closeStream(); clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='准备好，开始你的下一步。'; $('prompt').value=''; renderAttachments(); controls(); }
 function loggedOut() { clearConversation(); S.user=null; S.csrf=''; S.connected=false; S.projects=[]; S.threads=[]; S.project=null; S.models=[]; S.items.clear(); $('workspace').hidden=true; $('login-view').hidden=false; $('settings-dialog').close(); $('new-thread-dialog').close(); $('password').value=''; }
 function controls() {
-  const ready=!!S.thread && S.connected && permission('send');
+  const ready=!!S.project && S.connected && permission('send');
   $('send').disabled=!ready || S.status==='running' || S.sending;
   $('prompt').disabled=!ready || S.sending;
-  $('stop').hidden=S.status!=='running'; $('stop').disabled=!ready;
+  $('stop').hidden=S.status!=='running'; $('stop').disabled=!ready || !S.thread;
   $('attach').disabled=!ready || !permission('files') || S.sending;
   $('new-thread').disabled=!S.connected || !permission('send') || S.sending;
   $('project-select').disabled=S.sending; $('settings').disabled=S.sending;
@@ -183,16 +183,29 @@ async function answerApproval(id,answer){ const thread=S.thread?.id, epoch=S.epo
 async function loadModels(){ const {data}=await api('/api/codex/models');S.models=data;$('model').replaceChildren();for(const model of data){const option=el('option',model.displayName||model.model||model.id);option.value=model.model||model.id;option.selected=!!model.isDefault;$('model').append(option);}loadEfforts(); }
 function loadEfforts(){ const model=S.models.find(m=>(m.model||m.id)===$('model').value);$('effort').replaceChildren(el('option','默认强度'));$('effort').firstChild.value='';for(const e of model?.supportedReasoningEfforts||[]){const option=el('option',e.reasoningEffort);option.value=e.reasoningEffort;option.selected=e.reasoningEffort===model.defaultReasoningEffort;$('effort').append(option);} }
 async function sendMessage(){
-  if(S.sending||!S.thread||!S.project||!$('prompt').value.trim())return;
-  S.sending=true;controls();const epoch=S.epoch;
-  const content={text:$('prompt').value,projectId:S.project.id,model:$('model').value,effort:$('effort').value,mode:$('mode').value,attachments:[...S.attachments]};
-  const fingerprint=JSON.stringify({thread:S.thread.id,...content});
-  if(S.attempt?.fingerprint!==fingerprint) S.attempt={fingerprint,requestId:crypto.randomUUID()};
+  if(S.sending || !S.project || !S.connected || !permission('send') || !$('prompt').value.trim())return;
+  const epoch=S.epoch; let accepted=false;
+  S.sending=true;
   try {
+    controls();
+    const content={text:$('prompt').value,projectId:S.project.id,model:$('model').value,effort:$('effort').value,mode:$('mode').value,attachments:[...S.attachments]};
+    // Create lazily: an empty project's composer is a real composer, not a disabled demo.
+    if(!S.thread){
+      S.creationId ||= CodexState.requestId();
+      const thread=await api('/api/codex/threads',{projectId:content.projectId,title:content.text.trim().slice(0,60),requestId:S.creationId});
+      if(epoch!==S.epoch)return;
+      S.thread=thread; S.threads.unshift(thread); S.status=thread.status;
+      $('thread-title').textContent=thread.title; $('empty').hidden=true; renderThreads();
+    }
+    const fingerprint=JSON.stringify({thread:S.thread.id,...content});
+    if(S.attempt?.fingerprint!==fingerprint)S.attempt={fingerprint,requestId:CodexState.requestId()};
     await api(`/api/codex/threads/${encodeURIComponent(S.thread.id)}/messages`,{...content,requestId:S.attempt.requestId});
-    if(epoch===S.epoch){$('prompt').value='';S.attachments=[];S.attempt=null;renderAttachments();await syncSnapshot();}
-  } catch(error){notice('发送未确认：先检查任务状态。对同一内容再次发送将复用请求 ID，不自动重复提交。');throw error;}
-  finally{S.sending=false;controls();}
+    accepted=true;
+    if(epoch===S.epoch){$('prompt').value='';S.attachments=[];S.attempt=null;renderAttachments();notice();await syncSnapshot();}
+  }catch(error){
+    if(epoch===S.epoch)notice(accepted?'消息已发送，输出读取失败。点击任务可重新连接。':'发送失败：'+error.message);
+    throw error;
+  }finally{S.sending=false;controls();}
 }
 function renderAttachments(){ $('attachments').replaceChildren();for(const file of S.attachments){const button=el('button',`${file.split('/').pop()} ×`);button.type='button';button.onclick=()=>{S.attachments=S.attachments.filter(v=>v!==file);renderAttachments();};$('attachments').append(button);} }
 async function uploadFile(){const file=$('upload').files[0];if(!file)return;const epoch=S.epoch, projectId=S.project?.id;try{if(S.attachments.length>=5)throw new Error('最多 5 个附件。');if(file.size>4*1024*1024)throw new Error('上传文件不能超过 4 MiB。');const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=reject;reader.readAsDataURL(file);});if(epoch!==S.epoch || !projectId)throw new Error('项目已切换，已取消上传。');const result=await api('/api/codex/files',{projectId,name:file.name,base64:data});if(epoch===S.epoch){S.attachments.push(result.path);renderAttachments();toast('已上传到项目内的独立附件目录。');}}finally{$('upload').value='';} }
@@ -203,7 +216,7 @@ function renderQuota(limits){
   if(!limits.windows.length)container.append(el('p','Codex 未提供额度窗口（部分 API-key / 自定义供应商账号不支持）。','footnote'));
   for(const window of limits.windows){const box=el('div',undefined,'quota-window'),head=el('div',undefined,'panel-title');const minutes=window.windowDurationMins;const label=minutes===10080?'周限额':minutes===300?'5 小时限额':minutes?`${minutes} 分钟窗口`:(window.name||window.id);head.append(el('span',label),el('strong',`${Math.round(window.usedPercent)}%`));const bar=el('progress');bar.max=100;bar.value=window.usedPercent;bar.setAttribute('aria-label',`${label} 已用 ${window.usedPercent}%`);box.append(head,bar,el('p',`已用 · 重置 ${date(window.resetsAt)}`,'footnote'));if(window.planType)box.append(el('p',window.planType,'footnote'));container.append(box);}
   const credits=limits.resetCredits;
-  if(credits){container.append(el('p',`可用重置卡：${credits.availableCount}`,'footnote'));for(const credit of credits.details){const card=el('div',undefined,'credit');card.append(el('strong',credit.title||'重置卡'));if(credit.description)card.append(el('p',credit.description));card.append(el('p',`到期 ${date(credit.expiresAt)}`,'footnote'));if(S.user?.admin&&credits.availableCount>0){const button=el('button','使用此卡','small');button.onclick=action(async()=>{if(!confirm('此操作会消耗共享 Codex 账号的重置卡，影响所有用户。确认使用？'))return;const result=await api('/api/codex/account/limits/reset',{requestId:crypto.randomUUID(),creditId:credit.id});renderQuota(result.rateLimits);toast('已请求使用，并重新读取实际额度。');});card.append(button);}container.append(card);}}
+  if(credits){container.append(el('p',`可用重置卡：${credits.availableCount}`,'footnote'));for(const credit of credits.details){const card=el('div',undefined,'credit');card.append(el('strong',credit.title||'重置卡'));if(credit.description)card.append(el('p',credit.description));card.append(el('p',`到期 ${date(credit.expiresAt)}`,'footnote'));if(S.user?.admin&&credits.availableCount>0){const button=el('button','使用此卡','small');button.onclick=action(async()=>{if(!confirm('此操作会消耗共享 Codex 账号的重置卡，影响所有用户。确认使用？'))return;const result=await api('/api/codex/account/limits/reset',{requestId:CodexState.requestId(),creditId:credit.id});renderQuota(result.rateLimits);toast('已请求使用，并重新读取实际额度。');});card.append(button);}container.append(card);}}
   container.append(el('p',`读取于 ${date(limits.fetchedAt)}`,'footnote'));
 }
 async function loadFiles(){if(!permission('files'))throw new Error('没有文件权限。');const epoch=S.epoch;const requested=S.filePath;const result=await api(apiProject('files',{path:requested}));if(epoch!==S.epoch||requested!==S.filePath)return;$('file-path').textContent=`/${requested==='.'?'':requested}`;$('file-list').replaceChildren();for(const entry of result.entries){if(entry.type==='directory'){const button=el('button',`▸ ${entry.name}`,'file-entry');button.onclick=action(async()=>{S.filePath=entry.path;await loadFiles();});$('file-list').append(button);}else{const link=el('a',entry.name,'file-entry');link.href=apiProject('files/content',{path:entry.path});link.download=entry.name;link.append(el('span',bytes(entry.size)));$('file-list').append(link);}}if(!result.entries.length)$('file-list').append(el('p','空目录或没有可展示的文件。','footnote')); }

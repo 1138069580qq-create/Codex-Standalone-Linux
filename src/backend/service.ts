@@ -398,7 +398,7 @@ export class CodexConsoleService {
       cursor: this.hub.cursor
     };
   }
-  async createThread(identity: Identity, projectId: string, title?: string) {
+  async createThread(identity: Identity, projectId: string, title?: string, requestId?: string) {
     const project = this.project(identity, projectId, "send");
     if (title !== undefined && (typeof title !== "string" || title.length > 120))
       throw new ConsoleError(400, "INVALID_TITLE", "Title is too long.");
@@ -408,6 +408,9 @@ export class CodexConsoleService {
         "ROOT_CHANGED",
         "Project root changed; reconfigure before continuing."
       );
+    if (requestId !== undefined && (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(requestId)))
+      throw new ConsoleError(400, "INVALID_REQUEST_ID", "Invalid request ID.");
+    const create = async () => {
     const result = await this.rpc().request<any>("thread/start", {
       cwd: project.root,
       runtimeWorkspaceRoots: [project.root],
@@ -435,6 +438,8 @@ export class CodexConsoleService {
       title: title?.trim() || threadTitle(thread),
       status: runtimeStatus(thread)
     };
+    };
+    return requestId ? this.receipts.run(`${identity.uuid}:create:${projectId}:${requestId}`, create) : create();
   }
   async send(identity: Identity, projectId: string, id: string, input: any) {
     const project = this.project(identity, projectId, "send");

@@ -117,7 +117,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
     wrap((c, who) => {
       rateLimit(who, "create", 10);
       const b = body(c);
-      return service.createThread(who, b.projectId, b.title);
+      return service.createThread(who, b.projectId, b.title, b.requestId);
     })
   );
   router.get(

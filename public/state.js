@@ -1,5 +1,16 @@
 /* Shared, deterministic client reducer; no DOM and no network dependencies. */
 (function (scope) {
+  // randomUUID is secure-context-only; getRandomValues is also available on HTTP.
+  function requestId(cryptoApi = globalThis.crypto) {
+    if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID();
+    if (typeof cryptoApi?.getRandomValues !== 'function') throw new Error('浏览器无法生成请求 ID，请使用现代浏览器或 HTTPS。');
+    const bytes = new Uint8Array(16);
+    cryptoApi.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    const hex = Array.from(bytes, n => n.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+  }
   function applyEvent(state, event) {
     const p = event.payload || {};
     if (event.type === 'item') state.items.set(p.id, { ...p });
@@ -31,7 +42,7 @@
     }
     return { events, carry: tail };
   }
-  const api = { applyEvent, parseSse };
+  const api = { applyEvent, parseSse, requestId };
   if (typeof module !== 'undefined') module.exports = api;
   else scope.CodexState = api;
 })(globalThis);
