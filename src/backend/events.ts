@@ -9,7 +9,8 @@ export interface ConsoleEvent {
     | "approvalResolved"
     | "reset"
     | "connection"
-    | "limits";
+    | "limits"
+    | "queue";
   projectId?: string;
   threadId?: string;
   payload: any;

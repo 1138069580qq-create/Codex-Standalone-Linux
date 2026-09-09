@@ -75,13 +75,12 @@ test('desktop reselect preserves draft; a different task is rejected before clea
   await assert.rejects(c.selectThread({id:'unrelated'}),/仅支持桌面当前任务/);
   assert.equal(elements.prompt.value,'hello');assert.equal(S.thread.id,'desktop-task');
 });
-test('desktop missing task or a busy snapshot keeps the draft without creating or sending',async()=>{
+test('missing desktop task preserves draft; running task accepts a queue entry without creating a turn',async()=>{
   const {c,S,elements,calls}=attached();S.threads=[];
   await assert.rejects(c.sendMessage(),/当前桌面任务未加载/);
   assert.equal(elements.prompt.value,'hello');assert.equal(S.sending,false);assert.equal(calls.length,0);
   S.threads=[{id:'desktop-task',title:'Pinned',status:'idle'}];c.syncSnapshot=async()=>{S.status='running';};
-  await assert.rejects(c.sendMessage(),/任务仍在运行/);
-  assert.equal(elements.prompt.value,'hello');assert.equal(S.sending,false);assert.equal(calls.length,0);
+  await c.sendMessage();assert.equal(elements.prompt.value,'');assert.equal(S.sending,false);assert.equal(calls.length,1);assert.equal(calls[0].url,'/api/codex/threads/desktop-task/queue');
 });
 test('desktop failed send retains its draft and request ID for a user-driven retry',async()=>{
   const {c,S,elements,calls}=attached();const api=c.api;let failed=false;
@@ -153,4 +152,20 @@ test('composer context footer resets on no thread and distinguishes zero from un
  S.tokenUsage={last:0,contextWindow:100000};c.controls();assert.match(elements['context-window'].textContent,/0.0%/);S.tokenUsage={last:100};c.controls();assert.match(elements['context-window'].textContent,/未提供/);
  S.thread=null;c.controls();assert.match(elements['context-window'].textContent,/待获取/);assert.equal(elements['context-window'].disabled,true);assert.doesNotMatch(elements['context-window'].textContent,/25.0K/);
  assert.ok(source.includes("$('context-window').onclick=action(showStatus)"));
+});
+
+test('running composer stays enabled, queues by default, and immediate send targets the current turn',async()=>{
+ const {c,S,elements,calls}=setup();S.thread={id:'active'};S.status='running';S.turnId='turn-1';S.capabilities={};c.controls();
+ assert.equal(elements.send.disabled,false);assert.equal(elements.prompt.disabled,false);assert.equal(elements['send-now'].hidden,false);
+ await c.sendMessage();assert.equal(calls[0].url,'/api/codex/threads/active/queue');
+ elements.prompt.value='immediate';await c.sendMessage('steer');assert.equal(calls[1].url,'/api/codex/threads/active/messages');assert.equal(calls[1].body.delivery,'steer');assert.equal(calls[1].body.expectedTurnId,'turn-1');
+ elements.prompt.value='unknown turn';S.turnId=null;await assert.rejects(c.sendMessage('steer'),/当前没有/);assert.equal(elements.prompt.value,'unknown turn');assert.equal(calls.length,2);
+});
+test('idle conversation with a pending queue does not jump ahead of older messages',async()=>{
+ const {c,S,calls}=setup();S.thread={id:'active'};S.queueCount=2;await c.sendMessage();assert.ok(calls[0].url.endsWith('/queue'));
+});
+
+test('regular app-server selection survives reload and is keyed by signed-in account',async()=>{
+ const {c,S,elements}=setup();elements.sidebar.classList={remove(){}};S.user={id:'alice',admin:false};S.capabilities={};S.projects=[{id:'demo'}];S.thread={id:'remembered',title:'Saved'};S.threads=[S.thread];c.rememberSelectedTask();S.thread=null;
+ await c.restoreSelectedTask();assert.equal(S.thread.id,'remembered');S.user={id:'bob',admin:false};S.thread=null;await c.restoreSelectedTask();assert.equal(S.thread,null);
 });

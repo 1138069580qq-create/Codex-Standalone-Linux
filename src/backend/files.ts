@@ -1,3 +1,4 @@
+import { StringDecoder } from 'node:string_decoder';
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
@@ -671,7 +672,7 @@ export async function projectDiff(
   try {
     const result = await runGit(projectRoot, args, MAX_DIFF_BYTES);
     return {
-      text: result.stdout.subarray(0, MAX_DIFF_BYTES).toString("utf8"),
+      text: result.overflow ? new StringDecoder("utf8").write(result.stdout.subarray(0, MAX_DIFF_BYTES)) : result.stdout.toString("utf8"),
       truncated: result.overflow
     };
   } catch (error) {

@@ -86,3 +86,13 @@ test('UI follows live model/effort/permissions, preserves explicit user choices 
   assert.ok(elements.model.options.some((o:any)=>o.value==='new-provider-model'));assert.equal(elements.model.value,'next','do not silently replace a pending user selection');
   S.settingsOverrides={};c.renderThreadSettings();assert.equal(elements.model.value,'current');assert.equal(elements.effort.value,'max');
 });
+
+test('desktop immediate send uses guarded turn/steer and preserves the active model/settings',async()=>{
+ const root=await mkdtemp(path.join(os.tmpdir(),'webui-desktop-steer-'));const config=new ConfigStore(path.join(root,'config.json'));config.value={...config.value,enabled:true,projects:[{id:'demo',name:'Demo',root,grants:[]}]};
+ const calls:any[]=[];const desktop:any=Object.assign(new EventEmitter(),{threadId:'task',connected:true,state:{...state(),cwd:root,threadRuntimeStatus:'inProgress',turns:[{id:'current',turnId:'current',items:[]}]},close(){},request(){throw Error('must not use start/interrupt');}});
+ const bridge:any={available:true,async rpc(method:string,params:any){calls.push({method,params});return {turnId:'current'};}};
+ const service=new DesktopSessionService(config,new CommandReceipts(path.join(root,'receipts.json')),desktop,new DesktopModelCatalog(root),bridge);
+ try{const input={text:'补充',requestId:'desktop-steer-001',delivery:'steer',expectedTurnId:'current'};const result=await service.send(admin,'demo','task',input);assert.equal(result.steered,true);assert.equal(calls[0].method,'turn/steer');assert.equal(calls[0].params.expectedTurnId,'current');assert.equal(calls[0].params.model,undefined);
+ await assert.rejects(service.send(admin,'demo','task',{...input,requestId:'desktop-steer-002',expectedTurnId:'stale'}),/轮次已改变/);
+ }finally{service.disconnect();}
+});

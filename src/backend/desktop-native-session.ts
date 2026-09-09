@@ -1,6 +1,8 @@
 import {DesktopIpc} from './desktop-ipc';
 import type {DesktopBridgeApi} from './desktop-bridge';
 import {ConsoleError} from './config';
+import {restoredTokenUsage} from './context';
+import {textPrefix} from './text';
 /** Same running desktop backend for tasks without a view-owner; event-driven, never polling or spawning. */
 export class DesktopNativeSession extends DesktopIpc {
   private unwatch?:()=>void;private queued:any[]=[];private loading=false;
@@ -10,7 +12,7 @@ export class DesktopNativeSession extends DesktopIpc {
     this.loading=true;
     this.unwatch=await this.bridge.watch(this.threadId,event=>{if(event.method==='disconnect'){this.connected=false;this.emit('disconnect');return;}if(this.loading){if(this.queued.length<1000)this.queued.push(event);return;}this.reduce(event);});
     try{const resumed=await this.bridge.rpc('thread/resume',{threadId:this.threadId,excludeTurns:true});const thread=resumed.thread;
-      this.state={cwd:thread.cwd,title:thread.name||thread.preview||thread.id,threadRuntimeStatus:thread.status,modelProvider:resumed.modelProvider,latestThreadSettings:{model:resumed.model,effort:resumed.reasoningEffort},currentPermissions:{sandboxPolicy:resumed.sandbox,approvalPolicy:resumed.approvalPolicy},turns:[]};
+      this.state={latestTokenUsageInfo:await restoredTokenUsage(thread),cwd:thread.cwd,title:thread.name||thread.preview||thread.id,threadRuntimeStatus:thread.status,modelProvider:resumed.modelProvider,latestThreadSettings:{model:resumed.model,effort:resumed.reasoningEffort},currentPermissions:{sandboxPolicy:resumed.sandbox,approvalPolicy:resumed.approvalPolicy},turns:[]};
       await this.refresh();this.connected=true;this.ownerId='existing-desktop-backend';this.loading=false;for(const event of this.queued)this.reduce(event);this.queued=[];this.emit('state',this.state);
     }catch(error){this.loading=false;this.close();throw error;}
   }
@@ -26,7 +28,7 @@ export class DesktopNativeSession extends DesktopIpc {
       case 'thread/goal/updated':state.threadGoal=p.goal;break;
       case 'turn/started':case 'turn/completed':Object.assign(turn(p.turn.id),p.turn);state.threadRuntimeStatus={type:event.method==='turn/started'?'active':'idle'};break;
       case 'item/started':case 'item/completed':{const t=turn(p.turnId||turns.at(-1)?.id||'live'),index=t.items.findIndex((i:any)=>i.id===p.item.id);if(index<0)t.items.push(p.item);else t.items[index]=p.item;break;}
-      case 'item/agentMessage/delta':case 'item/commandExecution/outputDelta':case 'item/plan/delta':{const t=turn(p.turnId||turns.at(-1)?.id||'live');let item=t.items.find((i:any)=>i.id===p.itemId);if(!item){item={id:p.itemId,type:event.method.includes('agentMessage')?'agentMessage':event.method.includes('plan')?'plan':'commandExecution',text:''};t.items.push(item);}const field=item.type==='commandExecution'?'aggregatedOutput':'text';item[field]=(item[field]||'').concat(p.delta).slice(0,65536);break;}
+      case 'item/agentMessage/delta':case 'item/commandExecution/outputDelta':case 'item/plan/delta':{const t=turn(p.turnId||turns.at(-1)?.id||'live');let item=t.items.find((i:any)=>i.id===p.itemId);if(!item){item={id:p.itemId,type:event.method.includes('agentMessage')?'agentMessage':event.method.includes('plan')?'plan':'commandExecution',text:''};t.items.push(item);}const field=item.type==='commandExecution'?'aggregatedOutput':'text';if(!item.truncated){const text=(item[field]||'').concat(p.delta);item[field]=textPrefix(text,65536);item.truncated=text.length>65536;}break;}
       case 'error':turn(turns.at(-1)?.id||'live').items.push({id:'error-'+Date.now(),type:'other',text:p.error?.message,status:'failed'});break;
     }
     this.trim();this.emit('state',state);

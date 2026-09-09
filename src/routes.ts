@@ -5,6 +5,7 @@ import type Koa from "koa";
 import Router from "@koa/router";
 import { ConfigStore, ConsoleError, type Identity, requireAdmin, permissions } from "./backend/config";
 import { CommandReceipts } from "./backend/receipts";
+import { MessageQueue } from "./backend/message-queue";
 import { UsageLedger } from "./backend/usage";
 import { CodexConsoleService } from "./backend/service";
 import { listProjectFiles, openProjectDownload, uploadProjectFile, projectDiff } from "./backend/files";
@@ -12,11 +13,12 @@ import { listProjectFiles, openProjectDownload, uploadProjectFile, projectDiff }
 export type ServiceFactory = (config: ConfigStore, receipts: CommandReceipts) => CodexConsoleService;
 
 export async function createCodexRoutes(config: ConfigStore, publicOrigin: string,
-  sessionIdentity: (ctx: Koa.Context) => Identity | null, factory?: ServiceFactory, listMembers: () => readonly {id:string;username:string}[] = () => []) {
+  sessionIdentity: (ctx: Koa.Context) => Identity | null, factory?: ServiceFactory, listMembers: () => readonly {id:string;username:string}[] = () => [], resolveQueueUser?: (id:string)=>Identity|null) {
   const receipts = new CommandReceipts(path.join(path.dirname(config.file), "receipts.json"));
   await receipts.load();
   const service = factory ? factory(config, receipts) : new CodexConsoleService(config, receipts);
   const usage=new UsageLedger(path.join(path.dirname(config.file),"usage.sqlite"));service.attachUsage(usage);
+  const queue=new MessageQueue(path.join(path.dirname(config.file),"message-queue.json"),service,resolveQueueUser);await queue.load();
   let sampledAt=0;let sampling:Promise<void>|undefined;
   async function sampleQuota(who:Identity){
     if(sampling)return sampling;if(Date.now()-sampledAt<300000)return;
@@ -144,7 +146,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
   );
   router.get(
     "/threads/:id",
-    wrap((c, who) => service.snapshot(who, param(c, "projectId", 64), c.params.id))
+    wrap(async(c,who)=>{const projectId=param(c,"projectId",64);const snapshot=await service.snapshot(who,projectId,c.params.id);return {...snapshot,queue:queue.rows(who,projectId,c.params.id)};})
   );
   router.post(
     "/threads/:id/messages",
@@ -153,6 +155,9 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
       return service.send(who, b.projectId, c.params.id, b);
     })
   );
+  router.get('/threads/:id/queue',wrap((c,who)=>queue.list(who,param(c,'projectId',64),c.params.id)));
+  router.post('/threads/:id/queue',wrap((c,who)=>{const b=body(c);return queue.enqueue(who,b.projectId,c.params.id,b);}));
+  router.patch('/threads/:id/queue/:messageId',wrap((c,who)=>{const b=body(c);return queue.change(who,b.projectId,c.params.id,c.params.messageId,b);}));
   router.post(
     "/threads/:id/interrupt",
     wrap((c, who) => service.interrupt(who, body(c).projectId, c.params.id))
@@ -344,5 +349,5 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
     })
   );
   return { router, service, closeStreams() { for (const stream of streams) stream.destroy(); },
-    close() { for (const stream of streams) stream.destroy(); service.disconnect(); usage.close(); } };
+    close() { void queue.close(); for (const stream of streams) stream.destroy(); service.disconnect(); usage.close(); } };
 }

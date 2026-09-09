@@ -29,10 +29,10 @@
         if (item.text.slice(p.offset, p.offset + p.text.length) === p.text) return true;
         return false;
       }
-      item.text = (item.text + p.text).slice(0, 65536);
+      item.text = textPrefix(item.text + p.text, 65536);
     } else if (event.type === 'approval') state.pending.set(p.id, p);
     else if (event.type === 'approvalResolved') state.pending.delete(p.id);
-    else if (event.type === 'status') { state.status = p.status || state.status; if(p.tokenUsage)state.tokenUsage=p.tokenUsage; }
+    else if (event.type === 'status') { state.status = p.status || state.status; if('tokenUsage' in p)state.tokenUsage=p.tokenUsage;if('turnId' in p)state.turnId=p.turnId; }
     let size = [...state.items.values()].reduce((sum, v) => sum + v.text.length, 0);
     while (state.items.size > 200 || size > 512 * 1024) {
       const key = state.items.keys().next().value;
@@ -49,13 +49,19 @@
     }
     return { events, carry: tail };
   }
+  function textPrefix(text,max){let end=Math.min(text.length,Math.max(0,max));if(end<text.length&&end>0&&/[\uD800-\uDBFF]/.test(text[end-1])&&/[\uDC00-\uDFFF]/.test(text[end]))end--;return text.slice(0,end);}
+  function textDiagnostics(text){
+    let replacement=0,unpaired=0;const samples=[];
+    for(const char of text){const n=char.codePointAt(0);if(n===0xfffd)replacement++;if(n>=0xd800&&n<=0xdfff)unpaired++;if(n>127&&samples.length<96)samples.push(char+' U+'+n.toString(16).toUpperCase().padStart(4,'0'));}
+    return {replacement,unpaired,samples};
+  }
   function contextWindow(usage) {
     const valid = v => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
     const used = valid(usage?.last) ? usage.last : null;
     const capacity = valid(usage?.contextWindow) && usage.contextWindow > 0 ? usage.contextWindow : null;
     return { used, capacity, percent: used !== null && capacity !== null ? used / capacity * 100 : null, remaining: used !== null && capacity !== null ? Math.max(0, capacity - used) : null };
   }
-  const api = { applyEvent, parseSse, requestId, windowLabel, contextWindow };
+  const api = { applyEvent, parseSse, requestId, windowLabel, contextWindow, textPrefix, textDiagnostics };
   if (typeof module !== 'undefined') module.exports = api;
   else scope.CodexState = api;
 })(globalThis);

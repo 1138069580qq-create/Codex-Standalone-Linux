@@ -33,7 +33,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
   let authInFlight = 0; let parsing = 0;
   const token = (ctx: Koa.Context) => ctx.cookies.get(cookieName, { signed: false }) || "";
   const current = (ctx: Koa.Context) => sessions.get(token(ctx), users);
-  const routes = await createCodexRoutes(config, options.origin, ctx => current(ctx)?.identity || null, serviceFactory, () => users.users.map(publicUser));
+  const routes = await createCodexRoutes(config, options.origin, ctx => current(ctx)?.identity || null, serviceFactory, () => users.users.map(publicUser), id=>{const user=users.users.find(u=>u.id===id);return user?{uuid:user.id,elevated:user.admin}:null;});
   function setCookie(ctx: Koa.Context, value: string, maxAge: number) {
     // TLS may terminate at the configured reverse proxy. Origin is startup-validated.
     ctx.cookies.secure = options.secureCookies;
@@ -144,7 +144,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
   app.use(auth.routes()).use(auth.allowedMethods());
   app.use(routes.router.routes()).use(routes.router.allowedMethods());
   const assets = new Map<string, { raw: Buffer; gzip: Buffer; br: Buffer; etag: string; type: string }>();
-  const allowed = [["/", "index.html", "text/html"], ["/app.js", "app.js", "text/javascript"], ["/state.js", "state.js", "text/javascript"], ["/usage.js", "usage.js", "text/javascript"], ["/style.css", "style.css", "text/css"]];
+  const allowed = [["/", "index.html", "text/html"], ["/app.js", "app.js", "text/javascript"], ["/queue.js", "queue.js", "text/javascript"], ["/state.js", "state.js", "text/javascript"], ["/usage.js", "usage.js", "text/javascript"], ["/style.css", "style.css", "text/css"]];
   const assetVersions = new Map<string,string>();
   for(const [route,filename] of allowed) if(route !== "/") assetVersions.set(route,createHash("sha256").update(await fs.readFile(path.join(staticDir,filename))).digest("hex").slice(0,12));
   for (const [route, filename, type] of allowed) {

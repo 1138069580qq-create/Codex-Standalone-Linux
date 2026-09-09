@@ -89,7 +89,7 @@ export class DesktopSessionService extends CodexConsoleService {
     this.update();this.hub.publish({type:'connection',payload:{connected:true}});
   }
   override disconnect(){this.invalidateSubscription();if(this.updateTimer)clearTimeout(this.updateTimer);this.updateTimer=undefined;this.catalog.close();this.desktop.close();}
-  override status(identity:Identity):any {return {configured:true,connected:this.desktop.connected,transport:'desktop-ipc',serverVersion:'existing desktop IPC',desktopSync:'verified-owner',processPolicy:'attach-only',userId:identity.uuid,admin:identity.elevated,maxConcurrentTurns:MAIN_TURN_LIMIT,attachedThreadId:this.desktop.threadId,capabilities:{createThread:false,extensions:!!this.bridge?.available,mcp:!!this.bridge?.available,quota:false,resetQuota:false,setGoal:false,approvals:false,configureTransport:false},reason:this.desktop.connected?undefined:'桌面未连接'};}
+  override status(identity:Identity):any {return {configured:true,connected:this.desktop.connected,transport:'desktop-ipc',serverVersion:'existing desktop IPC',desktopSync:'verified-owner',processPolicy:'attach-only',userId:identity.uuid,admin:identity.elevated,maxConcurrentTurns:MAIN_TURN_LIMIT,attachedThreadId:this.desktop.threadId,capabilities:{steer:!!this.bridge?.available,createThread:false,extensions:!!this.bridge?.available,mcp:!!this.bridge?.available,quota:false,resetQuota:false,setGoal:false,approvals:false,configureTransport:false},reason:this.desktop.connected?undefined:'桌面未连接'};}
   override async listThreads(identity:Identity,projectId:string):Promise<any>{this.requireCurrent(identity,projectId);return {data:[{id:this.desktop.threadId,title:this.desktop.state.title||'桌面当前任务',status:this.lastStatus,updatedAt:this.desktop.state.updatedAt}],nextCursor:null};}
   override async snapshot(identity:Identity,projectId:string,id:string):Promise<any>{this.requireCurrent(identity,projectId,id);this.update();return {id,title:this.desktop.state.title||'桌面当前任务',status:this.lastStatus,turnId:this.turns().at(-1)?.turnId,items:[...this.items.values()],pending:[],cursor:this.hub.cursor,truncated:true,settings:desktopSettings(this.desktop.state),tokenUsage:desktopUsage(this.desktop.state),metrics:this.usageSnapshot(id)};}
   override async models(identity:Identity):Promise<any>{
@@ -102,6 +102,7 @@ export class DesktopSessionService extends CodexConsoleService {
   override async goal(identity:Identity,projectId:string,id:string,objective?:string):Promise<any>{this.requireCurrent(identity,projectId,id);if(objective!==undefined)throw new ConsoleError(501,'DESKTOP_API_UNAVAILABLE','请在桌面中设置目标。');return {goal:this.desktop.state.threadGoal||null};}
   override async send(identity:Identity,projectId:string,id:string,input:any):Promise<any>{
     const project=this.requireCurrent(identity,projectId,id,'send');
+    if(input?.delivery!==undefined&&input.delivery!=='steer')throw new ConsoleError(400,'INVALID_DELIVERY','不支持的发送方式。');
     if(typeof input?.text!=='string'||!input.text.trim()||input.text.length>64000||!/^[-a-zA-Z0-9_]{8,100}$/.test(input.requestId))throw new ConsoleError(400,'INVALID_MESSAGE','无效的消息。');
     if(input.extensions!==undefined&&(!Array.isArray(input.extensions)||input.extensions.length>12))throw new ConsoleError(400,'INVALID_EXTENSIONS','最多选择 12 个技能或插件。');
     const content:any[]=[{type:'text',text:input.text,text_elements:[]}];
@@ -112,6 +113,14 @@ export class DesktopSessionService extends CodexConsoleService {
       for(const ref of input.attachments){const full=await attachmentPath(project.root,ref);if(/\.(png|jpe?g|webp)$/i.test(full))content.push({type:'localImage',path:full});else content[0].text+='\n\nAttached project file: '+ref;}
     }
     return this.receipts.run(`${identity.uuid}:desktop:${id}:${input.requestId}`,async markSubmitted=>{
+      if(input.delivery==='steer'){
+        const current=this.turns().at(-1),turnId=current?.turnId||current?.id;
+        if(!this.hasActiveWork||!turnId)throw new ConsoleError(409,'NO_ACTIVE_TURN','当前轮已结束，消息未发送；可加入队列。');
+        if(typeof input.expectedTurnId!=='string'||input.expectedTurnId!==turnId)throw new ConsoleError(409,'TURN_CHANGED','运行中的轮次已改变，请刷新后确认再发送。');
+        if(!this.bridge?.available)throw new ConsoleError(501,'STEER_UNAVAILABLE','当前连接不支持立即补充，请使用排队发送。');
+        markSubmitted();const result=await this.bridge.rpc('turn/steer',{threadId:id,expectedTurnId:turnId,input:content});
+        return {turnId:result.turnId||turnId,status:'running',steered:true};
+      }
       if(this.hasActiveWork)throw new ConsoleError(409,'THREAD_BUSY','桌面任务仍在运行，请等待本轮结束。');
       const wantsModel=Array.isArray(input.settingsOverrides)&&input.settingsOverrides.some((k:string)=>['model','effort','mode'].includes(k));
       const data=wantsModel?(await this.models(identity)).data:[];

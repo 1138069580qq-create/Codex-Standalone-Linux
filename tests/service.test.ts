@@ -65,6 +65,8 @@ class FakeCodexPeer extends EventEmitter {
             }
           ]
         } as T;
+      case "turn/steer":
+        return {turnId:params.expectedTurnId} as T;
       case "turn/start":
         return new Promise<T>((resolve) => {
           this.turnStarts.push({ params, resolve });
@@ -386,4 +388,31 @@ test('a project-busy preflight does not poison the same message id for a later m
 
 test('confirmed full access is available to a regular authorized user without granting administrator status',{timeout:5000},async t=>{
  const {service,peer,identity}=await fixture();t.after(()=>service.disconnect());const sending=service.send(identity,'alpha','thread-alpha',{text:'Confirmed task',requestId:'regular-full-confirmed',access:'full',confirmFullAccess:true});await Promise.race([peer.waitForTurnStarts(1),sending]);assert.equal(peer.turnStarts[0].params.sandboxPolicy.type,'dangerFullAccess');assert.equal(identity.elevated,false);peer.resolveTurnStart('thread-alpha');await sending;
+});
+
+test('steer supplements the current turn without a new main-turn reservation or interrupt; retries are idempotent',async t=>{
+ const {service,peer,identity}=await fixture();t.after(()=>service.disconnect());await service.snapshot(identity,'alpha','thread-alpha');
+ const thread=(peer as any).threads[0];thread.status='inProgress';peer.emit('notification',{method:'turn/started',params:{threadId:thread.id,turn:{id:'live-turn',status:'inProgress'}}});
+ const input={requestId:'steer-request-001',text:'补充 👩🏽‍💻',delivery:'steer',expectedTurnId:'live-turn'};
+ const result=await service.send(identity,'alpha',thread.id,input);assert.ok('steered' in result&&result.steered);await service.send(identity,'alpha',thread.id,input);
+ assert.equal(peer.requests.filter(r=>r.method==='turn/steer').length,1);assert.equal(peer.requests.filter(r=>r.method==='turn/start'||r.method==='turn/interrupt').length,0);
+ assert.equal(peer.requests.find(r=>r.method==='turn/steer')!.params.input[0].text,input.text);
+ await assert.rejects(service.send(identity,'alpha',thread.id,{...input,requestId:'steer-request-002',expectedTurnId:'stale-turn'}),hasCode('TURN_CHANGED'));
+});
+test('live text delta boundaries and token usage remain intact through service snapshots',async t=>{
+ const {service,peer,identity}=await fixture();t.after(()=>service.disconnect());await service.snapshot(identity,'alpha','thread-alpha');
+ const send=(method:string,params:any)=>peer.emit('notification',{method,params:{threadId:'thread-alpha',...params}});
+ const text='中文𠮷👩🏽‍💻 العربية ไทย';for(const delta of text.split(''))send('item/agentMessage/delta',{itemId:'unicode',delta});
+ send('thread/tokenUsage/updated',{tokenUsage:{total:{totalTokens:900000},last:{totalTokens:25000},modelContextWindow:100000}});
+ const result=await service.snapshot(identity,'alpha','thread-alpha');assert.equal(result.items.find(i=>i.id==='unicode')!.text,text);assert.equal(result.tokenUsage?.last,25000);
+ send('item/agentMessage/delta',{itemId:'bounded',delta:'x'.repeat(65535)+'𠮷'});send('item/agentMessage/delta',{itemId:'bounded',delta:'tail'});
+ const final=await service.snapshot(identity,'alpha','thread-alpha');const bounded=final.items.find(i=>i.id==='bounded')!;assert.equal(bounded.text.length,65535);assert.equal(bounded.truncated,true);
+});
+
+test('a previously cached empty session can recover context later without starting a model turn',async t=>{
+ const {service,peer,identity}=await fixture();t.after(()=>service.disconnect());const first=await service.snapshot(identity,'alpha','thread-alpha');assert.equal(first.tokenUsage,null);
+ (peer as any).threads[0].tokenUsage={total:{totalTokens:800000},last:{totalTokens:25000},modelContextWindow:100000};
+ const next=await service.snapshot(identity,'alpha','thread-alpha');assert.equal(next.tokenUsage?.last,25000);assert.equal(next.tokenUsage?.contextWindow,100000);assert.equal(peer.requests.some(r=>r.method==='turn/start'),false);
+ peer.emit('notification',{method:'thread/tokenUsage/updated',params:{threadId:'thread-alpha',tokenUsage:{total:{totalTokens:900000},last:{totalTokens:0},modelContextWindow:100000}}});
+ assert.equal((await service.snapshot(identity,'alpha','thread-alpha')).tokenUsage?.last,0,'live compacted context beats stale history');
 });

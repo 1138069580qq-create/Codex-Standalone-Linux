@@ -1,3 +1,4 @@
+import {textPrefix} from './text';
 export interface TimelineItem {
   id: string;
   type: string;
@@ -38,7 +39,7 @@ export function normalizeItem(item: any): TimelineItem {
       : "";
   else if (type === "plan") text = String(item.text || "");
   else text = typeof item?.text === "string" ? item.text : type;
-  const truncated = text.length > MAX_ITEM_CHARS;
+  const truncated = !!item.truncated || text.length > MAX_ITEM_CHARS;
   return {
     id: String(item.id),
     type,
@@ -47,7 +48,7 @@ export function normalizeItem(item: any): TimelineItem {
       : type === "agentMessage"
         ? { role: "assistant" as const }
         : {}),
-    text: text.slice(0, MAX_ITEM_CHARS),
+    text: textPrefix(text, MAX_ITEM_CHARS),
     ...(typeof item.status === "string" ? { status: item.status } : {}),
     ...(type === "fileChange"
       ? {

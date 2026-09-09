@@ -5,6 +5,7 @@ import { EventEmitter } from 'node:events';
 import { parse } from 'smol-toml';
 import { ConsoleError, type Identity } from './config';
 import { accessPolicy } from './extensions';
+import {normalizeTokenUsage} from './context';
 
 const text=(v:unknown)=>typeof v==='string'?v.slice(0,200):null;
 const count=(v:unknown)=>typeof v==='number'&&Number.isFinite(v)&&v>=0?v:0;
@@ -18,8 +19,7 @@ export function desktopSettings(state:any) {
     sandboxType:text(sandbox.type),approvalPolicy:text(permission.approvalPolicy)};
 }
 export function desktopUsage(state:any) {
-  const info=state?.latestTokenUsageInfo;if(!info)return null;
-  return {total:count(info.total?.totalTokens),last:count(info.last?.totalTokens),contextWindow:count(info.modelContextWindow)||null};
+  return normalizeTokenUsage(state?.latestTokenUsageInfo);
 }
 async function readBounded(file:string,max:number){const h=await fs.open(file,'r');try{if((await h.stat()).size>max)throw new Error('Metadata file too large');return await h.readFile('utf8');}finally{await h.close();}}
 

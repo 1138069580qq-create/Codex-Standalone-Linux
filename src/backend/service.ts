@@ -15,6 +15,8 @@ import { normalizeSubscription, unavailableSubscription, type AccountSubscriptio
 import { UsageLedger } from "./usage";
 import { accountDirectoryName } from "./projects";
 import { ReplayHub } from "./events";
+import { normalizeTokenUsage, restoredTokenUsage, type TokenUsage } from "./context";
+import { textPrefix } from "./text";
 import { MainTurnGate, MAIN_TURN_LIMIT, readMainThreads } from "./concurrency";
 import {
   MAX_ITEM_CHARS,
@@ -33,7 +35,8 @@ import { readCatalog, publicCatalog, resolveExtensions, accessPolicy, readMcp, t
 
 interface Session {
   root?:string;
-  tokenUsage?: { total: number|null; last: number|null; contextWindow?: number };
+  tokenUsage?: TokenUsage|null;
+  contextReadAt?: number;
   id: string;
   projectId: string;
   title: string;
@@ -447,6 +450,8 @@ export class CodexConsoleService {
           excludeTurns: true
         });
         session.status = runtimeStatus(resumed.thread || thread);
+        const restored=await restoredTokenUsage({...thread,...resumed.thread});
+        if(!session.tokenUsage)session.tokenUsage=restored;
         const history = await this.rpc().request<any>("thread/turns/list", {
           threadId: id,
           limit: 20,
@@ -483,6 +488,15 @@ export class CodexConsoleService {
     const thread=await this.verifyThread(project, id);
     this.usage?.bind(id,identity,projectId,thread.model,thread.modelProvider,false,thread.serviceTier);
     const session = await this.open(project, id);
+    if(session.tokenUsage?.last==null||session.tokenUsage.contextWindow==null){
+      const supplied=normalizeTokenUsage(thread.tokenUsage??thread.latestTokenUsageInfo);
+      if(supplied||!session.contextReadAt||Date.now()-session.contextReadAt>15000){
+        session.contextReadAt=Date.now();const before=session.tokenUsage;
+        const restored=supplied||await restoredTokenUsage(thread);
+        // A live event arriving during the read always wins over disk/history.
+        if(restored&&session.tokenUsage===before)session.tokenUsage={total:before?.total??restored.total,last:before?.last??restored.last,contextWindow:before?.contextWindow??restored.contextWindow};
+      }
+    }
     this.flushDeltas();
     return {
       id,
@@ -550,6 +564,7 @@ export class CodexConsoleService {
   }
   async send(identity: Identity, projectId: string, id: string, input: any) {
     const project = this.project(identity, projectId, "send");
+    if(input?.delivery!==undefined && input.delivery!=="steer")throw new ConsoleError(400,"INVALID_DELIVERY","不支持的发送方式。");
     if (
       !input ||
       typeof input.text !== "string" ||
@@ -615,6 +630,13 @@ export class CodexConsoleService {
         content.push({ type: "localImage", path: absolute });
       else content[0].text += `\n\nAttached project file: ${rel}`;
     }
+    if(input.delivery==='steer')return this.receipts.run(`${identity.uuid}:${id}:${input.requestId}`,async markSubmitted=>{
+      if(session.status!=='running'||runtimeStatus(thread)!=='running'||!session.turnId)throw new ConsoleError(409,'NO_ACTIVE_TURN','当前轮已结束，消息未发送；可加入队列。');
+      if(typeof input.expectedTurnId!=='string'||input.expectedTurnId!==session.turnId)throw new ConsoleError(409,'TURN_CHANGED','运行中的轮次已改变，请刷新后确认再发送。');
+      markSubmitted();
+      const result=await this.rpc().request<any>('turn/steer',{threadId:id,expectedTurnId:input.expectedTurnId,input:content});
+      return {turnId:result.turnId||session.turnId,status:'running',steered:true};
+    },{trackSubmission:true});
     return this.receipts.run(`${identity.uuid}:${id}:${input.requestId}`, async markSubmitted => {
       const slot = await this.turnGate.acquire(id);
       let held = false, outcome: 'running' | 'complete' | 'rejected' | 'unknown' = 'rejected';
@@ -845,8 +867,7 @@ export class CodexConsoleService {
     if (!session) return;
     session.touched = Date.now();
     if (method === "thread/tokenUsage/updated") {
-      const n=(v:any)=>Number.isSafeInteger(v)&&v>=0?v:null;
-      session.tokenUsage={total:n(p.tokenUsage?.total?.totalTokens),last:n(p.tokenUsage?.last?.totalTokens),contextWindow:n(p.tokenUsage?.modelContextWindow)||undefined};
+      session.tokenUsage=normalizeTokenUsage(p.tokenUsage);
       this.hub.publish({type:"status",projectId:session.projectId,threadId:id,payload:{status:session.status,tokenUsage:session.tokenUsage,metrics:this.usageSnapshot(id)}});
       return;
     }
@@ -931,7 +952,13 @@ export class CodexConsoleService {
           payload: { ...item }
         });
       }
-      const text = String(p.delta || "").slice(0, Math.max(0, MAX_ITEM_CHARS - item.text.length));
+      if(item.truncated)return;
+      const incoming=String(p.delta || "");
+      if(item.text.length+incoming.length>MAX_ITEM_CHARS){
+        this.flushDeltas();item.text=textPrefix(item.text+incoming,MAX_ITEM_CHARS);item.truncated=true;
+        this.hub.publish({type:"item",projectId:session.projectId,threadId:id,payload:{...item}});return;
+      }
+      const text = incoming;
       if (!text) {
         item.truncated = true;
         return;
