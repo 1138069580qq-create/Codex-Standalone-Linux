@@ -101,3 +101,9 @@ test('weekly quota is allocated per realtime cost interval and then divided by f
  assert.equal(data.members[0].cycleUsage.cost,150);assert.equal(data.total.cycleUsage.cost,250);assert.ok(Math.abs(data.members[0].weeklyPercent!-5/3)<1e-10);assert.ok(Math.abs(data.members[1].weeklyPercent!-4/3)<1e-10);assert.ok(Math.abs(data.total.subscriptionPercent!-.6)<1e-10);
  assert.ok(Math.abs(ledger.overview(a).subscriptionPercent!-data.members[0].subscriptionPercent!)<1e-10);assert.ok(Math.abs(ledger.overview(b).subscriptionPercent!-data.members[1].subscriptionPercent!)<1e-10);
 });
+
+test('public plan metadata without billing dates retains dollars and separately exposes observed five-week percentages',async t=>{
+ const {ledger,at,tick}=await fixture(t);ledger.bind('observed-a',a,'pa',price.model,'Codex',true);ledger.bind('observed-b',b,'pb',price.model,'Codex',true);
+ ledger.syncSubscription(normalizeSubscription({account:{type:'chatgpt',planType:'pro'}},at()));sample(ledger,at(),10);tick(1000);ledger.usage('observed-a',counters(25000000),at());ledger.usage('observed-b',counters(50000000),at());sample(ledger,at(),12);
+ const d=ledger.memberOverview(admin,[{id:a.uuid,username:'A'},{id:b.uuid,username:'B'}]);assert.equal(d.cycle.configured,false);assert.equal(d.members[0].subscriptionPercent,null);assert.equal(d.members[0].cycleUsage.cost,50);assert.equal(d.total.cycleUsage.cost,150);assert.ok(Math.abs(d.members[0].observedSubscriptionPercent!-2/15)<1e-10);assert.ok(Math.abs(d.members[1].observedSubscriptionPercent!-4/15)<1e-10);assert.equal(d.total.observedSubscriptionPercent,.4);assert.equal(d.weeksPerCycle,5);
+});

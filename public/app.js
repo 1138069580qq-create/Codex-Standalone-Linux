@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const S = { user:null, csrf:'', projects:[], models:[], project:null, thread:null, threads:[], next:null,
   items:new Map(), pending:new Map(), status:'idle', cursor:'', stream:null, epoch:0, retry:0,
-  timer:null, hiddenTimer:null, renderTimer:null, nodes:new Map(), attachments:[], bytes:0, truncated:false,
+  timer:null, streamStableTimer:null, hiddenTimer:null, renderTimer:null, nodes:new Map(), attachments:[], bytes:0, truncated:false,
   connected:false, newTask:false, taskCreation:null, creationTimer:null, checkingCreation:false, attachedThreadId:null, capabilities:{}, panel:'quota', filePath:'.', syncing:null, sending:false, attempt:null, creationId:null,
   selected:[], references:[], goalDraft:'', accessConfirmed:false, tokenUsage:null, turnId:null, queueCount:0, threadSettings:null, settingsOverrides:{}, modelRequest:null, modelsUnavailable:false,
   catalog:null, catalogProject:null, catalogRequest:null, menuMode:'plus', menuOpen:false, menuItems:[], menuIndex:0, referencePath:'.', sideOrigin:null,actionAttempt:null };
@@ -50,7 +50,7 @@ async function api(url, body, method=body===undefined?'GET':'POST') {
 const q = params => new URLSearchParams(params).toString();
 const apiProject = (route, extra={}) => `/api/codex/${route}?${q({projectId:S.project?.id||'',...extra})}`;
 function permission(name) { return !!S.project?.permissions?.[name]; }
-function closeStream() { clearTimeout(S.timer); S.timer=null; S.stream?.close(); S.stream=null; }
+function closeStream() { clearTimeout(S.streamStableTimer);S.streamStableTimer=null; clearTimeout(S.timer); S.timer=null; S.stream?.close(); S.stream=null; }
 function clearConversation() { globalThis.CodexQueue?.reset();S.turnId=null;S.queueCount=0;globalThis.CodexUsage?.metrics(null); clearTimeout(S.creationTimer);S.creationTimer=null;S.newTask=false;S.newTaskConfirmed=false;S.modelRequest=null;S.modelsUnavailable=false;S.taskCreation=null;S.epoch++; closeStream(); if(!S.sideOrigin)$('side-context').hidden=true; clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='新任务'; S.selected=[]; S.references=[]; S.goalDraft=''; S.accessConfirmed=false; S.tokenUsage=null; S.threadSettings=null; S.settingsOverrides={}; $('access').value='default'; closeMenu(); $('prompt').value=''; renderAttachments(); controls(); }
 function loggedOut() { globalThis.CodexUsage?.reset(); S.sideOrigin=null;$('side-context').hidden=true;$('side-history').replaceChildren();clearConversation(); S.user=null; S.csrf=''; S.connected=false; S.attachedThreadId=null; S.capabilities={}; S.projects=[]; S.threads=[]; S.project=null; S.models=[]; S.items.clear(); $('workspace').hidden=true; $('login-view').hidden=false; $('settings-dialog').close(); $('new-thread-dialog').close(); for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close(); setAuthMode('login'); S.catalog=null; }
 function supports(capability) {
@@ -253,6 +253,7 @@ async function syncSnapshot() {
     $('stream-state').textContent='读取中…';
     const result=await api(apiProject(`threads/${encodeURIComponent(id)}`));
     if(epoch!==S.epoch) return;
+    if(result.connection){S.connected=!!result.connection.connected;S.capabilities=result.connection.capabilities||S.capabilities;}
     S.items=new Map(result.items.map(v=>[v.id,v])); S.pending=new Map(result.pending.map(v=>[v.id,v]));
     globalThis.CodexUsage?.metrics(result.metrics);S.cursor=result.cursor; S.tokenUsage=result.tokenUsage||null; S.turnId=result.turnId||null;globalThis.CodexQueue?.show(result.queue||[]); if(result.settings)applyThreadSettings(result.settings); S.status=result.status; S.truncated=result.truncated; S.nodes.clear(); $('timeline').replaceChildren($('empty')); $('empty').hidden=true;
     renderTimeline(); renderApprovals(); controls(); openStream();
@@ -265,14 +266,17 @@ function openStream() {
   closeStream(); if(!S.thread || !S.project || document.hidden) return;
   const epoch=S.epoch;
   const stream=new EventSource(apiProject('events',{threadId:S.thread.id,cursor:S.cursor})); S.stream=stream;
-  stream.onopen=()=>{ if(epoch!==S.epoch)return; S.retry=0; $('stream-state').textContent='已连接'; };
+  stream.onopen=()=>{ if(epoch!==S.epoch||S.stream!==stream)return; $('stream-state').textContent='已连接';
+    // An immediately failing SSE must not reset the backoff into a tight retry loop.
+    S.streamStableTimer=setTimeout(()=>{if(epoch===S.epoch&&S.stream===stream)S.retry=0;},15000);
+  };
   stream.addEventListener('codex',event=>{
     if(epoch!==S.epoch || S.stream!==stream) return;
     try {
       const data=JSON.parse(event.data); S.bytes+=new TextEncoder().encode(event.data).length;
       $('stream-state').title=`本页接收 ${bytes(S.bytes)}`;
       if(data.type==='reset') { syncSnapshot().catch(e=>toast(e.message,true)); return; }
-      if(data.type==='connection') { S.connected=!!data.payload.connected; controls(); if(!S.connected) { closeStream(); notice('Codex 已断开，请重新连接。'); } }
+      if(data.type==='connection') { S.connected=!!data.payload.connected; controls(); if(!S.connected) { closeStream(); $('stream-state').textContent='Codex 连接中断 · 等待恢复';scheduleReconnect(epoch);return; } }
       if(data.type==='limits') { if(S.panel==='quota'&&!document.hidden) loadQuota().catch(()=>{}); }
       if(!CodexState.applyEvent(S,data)) { syncSnapshot().catch(e=>toast(e.message,true)); return; }
       S.cursor=data.cursor;
@@ -284,7 +288,7 @@ function openStream() {
   });
   stream.onerror=()=>{
     if(epoch!==S.epoch||S.stream!==stream)return;
-    closeStream(); $('stream-state').textContent='重连中…';
+    closeStream(); $('stream-state').textContent=S.retry>=3?'实时连接受阻 · 正在重新同步':'连接中断 · 正在恢复';
     scheduleReconnect(epoch);
   };
 }
@@ -293,8 +297,19 @@ function scheduleReconnect(epoch){
   const delay=Math.min(30000,1000*2**Math.min(S.retry++,5))*(.8+Math.random()*.4);
   S.timer=setTimeout(async()=>{
     if(epoch!==S.epoch || document.hidden)return;
-    try { await api('/api/session'); if(epoch===S.epoch)openStream(); }
-    catch(error){ if(error.status!==401 && epoch===S.epoch){$('stream-state').textContent='网络不可用 · 退避重连中';scheduleReconnect(epoch);} }
+    try {
+      await api('/api/session');if(epoch!==S.epoch)return;
+      // A REST snapshot diagnoses errors hidden by EventSource, restores the configured
+      // backend after a restart and refreshes status/context/queue without resending input.
+      await syncSnapshot();
+    } catch(error){
+      if(error.status===401||epoch!==S.epoch)return;
+      if([400,403,404].includes(error.status)||['CODEX_DISCONNECTED','DISABLED','PROJECT_FORBIDDEN','THREAD_FORBIDDEN'].includes(error.code)){
+        $('stream-state').textContent=error.code==='CODEX_DISCONNECTED'?'Codex 已由管理员断开':'会话不可访问';notice(error.message);return;
+      }
+      if(error.status===503){S.connected=false;controls();}
+      $('stream-state').textContent=error.status===503?'Codex 未连接 · 等待恢复':'网络不可用 · 退避重连中';scheduleReconnect(epoch);
+    }
   },delay);
 }
 function scheduleRender(){ if(!S.renderTimer) S.renderTimer=setTimeout(()=>{S.renderTimer=null;renderTimeline();},80); }
@@ -462,13 +477,20 @@ function renderQuota(limits){
   for(const credit of cards){
     const card=el('div',undefined,'credit');
     card.append(el('p',credit.expiresAt===null?'不过期':credit.expiresAt?shortDate(credit.expiresAt)+' 到期':'未提供到期日'));
-    const button=el('button','使用重置卡','small');button.disabled=!S.user?.admin||!supports('resetQuota');
+    if(!S.user?.admin){card.append(el('p','仅管理员可以使用重置卡','footnote'));container.append(card);continue;}
+    const button=el('button','使用重置卡','small');button.disabled=!supports('resetQuota');
+    if(button.disabled)card.append(el('p','当前 Codex 连接未提供重置卡操作接口','footnote'));
     let requestId=null;
     button.onclick=action(async()=>{
+      const account=S.user?.id;
+      if(!S.user?.admin||!supports('resetQuota'))throw new Error('仅管理员可以使用重置卡。');
       if(!await confirmAction('使用重置卡','确认消耗一张重置卡？此操作不可撤销。'))return;
+      if(account!==S.user?.id||!S.user?.admin||!supports('resetQuota'))throw new Error('管理员权限或账户已改变，请重新打开额度。');
       requestId ||= CodexState.requestId();
       const result=await api('/api/codex/account/limits/reset',{requestId,...(credit.id?{creditId:credit.id}:{})});
-      renderQuota(result.rateLimits);toast('已更新额度');
+      if(account!==S.user?.id||!S.user?.admin)return;
+      renderQuota(result.rateLimits);toast(result.outcome==='reset'?'已使用重置卡并更新额度':'操作结果：'+result.outcome+'；请确认额度后再操作。');
+      globalThis.CodexUsage?.load(true).catch(()=>{});
     });
     card.append(button);container.append(card);
   }
@@ -478,7 +500,8 @@ async function loadFiles(){if(!permission('files'))throw new Error('没有文件
 async function loadDiff(){if(!permission('files'))throw new Error('没有文件权限。');const epoch=S.epoch;const result=await api(apiProject('diff'));if(epoch===S.epoch)$('diff-content').textContent=(result.text||'没有未提交的差异。')+(result.truncated?'\n[已截断到 256 KiB]':''); }
 async function switchPanel(panel){S.panel=panel;for(const name of ['quota','files','diff'])$('panel-'+name).hidden=name!==panel;for(const b of document.querySelectorAll('[data-panel]')){const active=b.dataset.panel===panel;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active));}if(panel==='files')await loadFiles();if(panel==='quota')await loadQuota();}
 async function openSettings(){$('settings-dialog').showModal();const config=await api('/api/codex/admin/config');$('transport').value=config.transport.type;$('endpoint').value=config.transport.endpoint;$('token-env').value=config.transport.bearerTokenEnv||'';$('concurrency').value=5;$('enabled').checked=config.enabled;$('projects-json').value=JSON.stringify(config.projects,null,2);$('candidates').replaceChildren();await loadUsers();}
-async function loadUsers(){const users=await api('/api/admin/users');$('users-list').replaceChildren();for(const user of users){const row=el('div',undefined,'user-record'),info=el('div');info.append(el('strong',`${user.username}${user.admin?' · 管理员':''}`),el('code',user.id));const edit=el('button','编辑','small');edit.type='button';edit.onclick=()=>{$('edit-user-id').value=user.id;$('new-username').value=user.username;$('new-admin').checked=user.admin;$('new-password').value='';$('new-username').focus();};row.append(info,edit);$('users-list').append(row);} }
+let usersSequence=0;
+async function loadUsers(){if(!S.user?.admin)return;const account=S.user.id,sequence=++usersSequence;const users=await api('/api/admin/users');if(sequence!==usersSequence||account!==S.user?.id||!S.user?.admin)return;$('users-list').replaceChildren();for(const user of users){const row=el('div',undefined,'user-record'),info=el('div');info.append(el('strong',`${user.username}${user.admin?' · 管理员':''}`),el('code',user.id));const edit=el('button','编辑','small');edit.type='button';edit.onclick=()=>{$('edit-user-id').value=user.id;$('new-username').value=user.username;$('new-admin').checked=user.admin;$('new-password').value='';$('new-username').focus();};row.append(info,edit);$('users-list').append(row);} await globalThis.CodexUsage?.loadAdminMembers(); }
 let authMode='login';
 function setAuthMode(mode){
   authMode=mode;const registering=mode==='register';$('login-title').textContent=registering?'注册普通账户':'登录';$('login-submit').textContent=registering?'注册并登录':'登录';$('register-note').hidden=!registering;
@@ -514,7 +537,7 @@ $('cancel-edit-user').onclick=()=>{$('user-form').reset();$('edit-user-id').valu
 for(const button of document.querySelectorAll('[data-panel]'))button.onclick=action(()=>switchPanel(button.dataset.panel));
 $('refresh-quota').onclick=action(()=>globalThis.CodexUsage?.load(true));$('refresh-files').onclick=action(loadFiles);$('refresh-diff').onclick=action(loadDiff);$('files-up').onclick=action(async()=>{S.filePath=S.filePath.includes('/')?S.filePath.slice(0,S.filePath.lastIndexOf('/')):'.';await loadFiles();});
 $('menu-toggle').onclick=()=>$('sidebar').classList.toggle('mobile-open');$('inspect-toggle').onclick=()=>$('inspector').classList.toggle('inspect-open');$('close-inspector').onclick=()=>$('inspector').classList.remove('inspect-open');
-document.addEventListener('visibilitychange',()=>{clearTimeout(S.hiddenTimer);if(document.hidden)S.hiddenTimer=setTimeout(()=>{closeStream();$('stream-state').textContent='已暂停';},15000);else if(!S.stream&&S.thread&&S.connected)openStream();});
+document.addEventListener('visibilitychange',()=>{clearTimeout(S.hiddenTimer);if(document.hidden)S.hiddenTimer=setTimeout(()=>{closeStream();$('stream-state').textContent='已暂停';},15000);else if(!S.stream&&S.thread)scheduleReconnect(S.epoch);});
 window.addEventListener('pagehide',closeStream);
 window.addEventListener('focus',()=>{if(S.connected&&S.attachedThreadId){loadModels().catch(e=>notice(e.message));refreshProjectChoices().catch(()=>{});}});
 api('/api/session').then(signedIn).catch(error=>{if(error.status!==401)toast(error.message,true);});

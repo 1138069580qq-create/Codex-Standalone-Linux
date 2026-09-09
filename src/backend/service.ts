@@ -112,7 +112,7 @@ export class CodexConsoleService {
       userId: identity.uuid,
       admin: identity.elevated,
       reason: this.peer?.connected ? undefined : this.reason,
-      capabilities:{projects:!!identity.uuid,projectless:!!identity.uuid,taskActions:true},
+      capabilities:{projects:!!identity.uuid,projectless:!!identity.uuid,taskActions:true,quota:true,resetQuota:!!identity.uuid&&identity.elevated},
       maxConcurrentTurns: MAIN_TURN_LIMIT
     };
   }
@@ -211,6 +211,7 @@ export class CodexConsoleService {
     this.sessions.clear();
     this.opening.clear();
     this.modelsCache = undefined;
+    this.limitsCache=undefined;
     this.subscriptionCache=undefined;
     this.catalogs.clear();
     this.reason = "Codex is disconnected.";
@@ -285,7 +286,7 @@ export class CodexConsoleService {
     return this.limitsCache;
   }
   async consumeRateLimitReset(identity: Identity, requestId: string, creditId?: string) {
-    if (!identity.elevated)
+    if (!identity.uuid || !identity.elevated)
       throw new ConsoleError(
         403,
         "ADMIN_REQUIRED",

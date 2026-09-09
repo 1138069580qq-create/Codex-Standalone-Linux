@@ -207,7 +207,11 @@ export class UsageLedger {
     const start=Math.max(cycle.start,this.getMeta('subscriptionAccountSince')||0),end=Math.min(cycle.end===null?snapshot.generatedAt:cycle.end-1,snapshot.generatedAt);
     const all=this.period(null,calibration.from,calibration.to);
     const observed=this.db.prepare('SELECT COALESCE(SUM(delta),0) consumed FROM quota WHERE at>? AND at<=?').get(calibration.from,calibration.to) as {consumed:number};
-    const usable=cycle.configured&&all.cost>0&&!all.unpriced&&observed.consumed>0&&!snapshot.quotaUnavailable;
+    const observedUsable=all.cost>0&&!all.unpriced&&observed.consumed>0&&!snapshot.quotaUnavailable;
+    const usable=cycle.configured&&observedUsable;
+    // Official account/read may supply a plan but no billing dates. Expose observed
+    // allocation separately; do not pretend it is a verified current billing period.
+    const showObserved=cycle.status==='unavailable'&&cycle.reason==='period-not-provided'&&observedUsable;
     // The denominator is always FIVE weekly allowances, never an estimated dollar budget.
     // Shared-account weekly consumption is apportioned by observed, priced member usage.
     const weeksPerCycle=5;
@@ -215,11 +219,13 @@ export class UsageLedger {
     const rows=members.map(member=>{
       const cycleUsage=this.period(member.id,start,end);
       const weeklyPercent=usable?(allocations.shares.get(member.id)||0):null;
-      return {id:member.id,username:member.username,cycleUsage,weeklyPercent,subscriptionPercent:weeklyPercent===null?null:weeklyPercent/weeksPerCycle};
+      const observedWeeklyPercent=showObserved?(allocations.shares.get(member.id)||0):null;
+      return {id:member.id,username:member.username,cycleUsage,weeklyPercent,subscriptionPercent:weeklyPercent===null?null:weeklyPercent/weeksPerCycle,observedWeeklyPercent,observedSubscriptionPercent:observedWeeklyPercent===null?null:observedWeeklyPercent/weeksPerCycle};
     });
-    const total={cycleUsage:empty(),weeklyPercent:usable?0:null as number|null,subscriptionPercent:usable?0:null as number|null};
+    const total={cycleUsage:empty(),weeklyPercent:usable?0:null as number|null,subscriptionPercent:usable?0:null as number|null,observedWeeklyPercent:showObserved?0:null as number|null,observedSubscriptionPercent:showObserved?0:null as number|null};
     for(const row of rows){for(const key of Object.keys(total.cycleUsage) as (keyof typeof total.cycleUsage)[])total.cycleUsage[key]+=row.cycleUsage[key];if(total.weeklyPercent!==null)total.weeklyPercent+=row.weeklyPercent!;}
     if(total.weeklyPercent!==null)total.subscriptionPercent=total.weeklyPercent/weeksPerCycle;
+    if(showObserved){total.observedWeeklyPercent=rows.reduce((sum,row)=>sum+row.observedWeeklyPercent!,0);total.observedSubscriptionPercent=total.observedWeeklyPercent/weeksPerCycle;}
     return {generatedAt:snapshot.generatedAt,cycle,calibration,weeksPerCycle,cycleCapacityPercent:100,estimate:true,pricingComplete:all.unpriced===0,quotaGap:snapshot.quotaGap,members:rows,total};
   }
   details(who:Identity,input:{range?:string;model?:string;provider?:string;before?:number;offsetMinutes?:number}={}){

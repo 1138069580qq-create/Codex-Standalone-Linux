@@ -6,7 +6,7 @@ const source=readFileSync('public/usage.js','utf8');
 function fixture(){
  const nodes:Record<string,any>={},pending:any[]=[],messages:string[]=[];
  const el=(tag:string,text?:string,className?:string):any=>({tag,textContent:text||'',className,children:[],hidden:false,append(...children:any[]){this.children.push(...children);},replaceChildren(...children:any[]){this.children=children;}});
- const context:any=vm.createContext({S:{user:{id:'admin',admin:true}},U:{memberSequence:0,tab:'members'},$: (id:string)=>nodes[id]??=el('div'),el,api:()=>new Promise((resolve,reject)=>pending.push({resolve,reject})),error:(s:string)=>messages.push(s),metric:(label:string,value:string)=>({label,value}),money:(v:number)=>'$'+v.toFixed(4),cost:(v:any)=>v.unpriced?'未定价':'$'+v.cost.toFixed(4),date:String,cycleMessage:()=> '未获取套餐日期',document:{querySelectorAll:()=>[]},renderTable:()=>{}});
+ const context:any=vm.createContext({S:{user:{id:'admin',admin:true}},U:{memberSequence:0,adminSequence:0,tab:'members'},$: (id:string)=>nodes[id]??=el('div'),el,api:()=>new Promise((resolve,reject)=>pending.push({resolve,reject})),error:(s:string)=>messages.push(s),metric:(label:string,value:string)=>({label,value}),money:(v:number)=>'$'+v.toFixed(4),cost:(v:any)=>v.unpriced?'未定价':'$'+v.cost.toFixed(4),date:String,cycleMessage:()=> '未获取套餐日期',document:{querySelectorAll:()=>[]},renderTable:()=>{}});
  vm.runInContext(source.slice(source.indexOf('  async function selectTab('),source.indexOf('  function renderEstimates(){')),context);
  return {nodes,pending,messages,context,run:(code:string)=>vm.runInContext(code,context)};
 }
@@ -38,4 +38,16 @@ test('personal sidebar retains consumed dollars and divides weekly usage by five
  vm.runInContext(source.slice(source.indexOf('  function renderSummary(){'),source.indexOf('  function metrics(m){')),c);vm.runInContext('renderSummary()',c);
  const text=JSON.stringify(nodes);assert.match(text,/7.5000/);assert.match(text,/20.00%/);assert.match(text,/40.0%/);assert.doesNotMatch(text,/999.00%|999999/);
  summary.cycle.configured=false;vm.runInContext('renderSummary()',c);assert.match(JSON.stringify(nodes),/待估算/);
+});
+
+test('account settings show the same member rows, dollar costs and total without opening a nested usage tab',async()=>{
+ const f=fixture(),p=f.run('loadAdminMembers()');f.pending[0].resolve(data);await p;
+ const text=JSON.stringify(f.nodes['admin-members']);for(const value of ['Alice','Bob','$8.0000','1.00%','3.00%','4.00%','合计'])assert.ok(text.includes(value),value);
+ assert.equal(f.nodes['admin-members'].hidden,false);assert.match(readFileSync('public/app.js','utf8'),/await globalThis\.CodexUsage\?\.loadAdminMembers\(\)/);
+ const stale=f.run('loadAdminMembers()');f.context.S.user={id:'member',admin:false};f.pending[1].resolve(data);await stale;assert.doesNotMatch(JSON.stringify(f.nodes['admin-members']),/Alice/);
+ const count=f.pending.length;await f.run('loadAdminMembers()');assert.equal(f.pending.length,count);
+});
+test('unknown billing dates label observed five-week shares instead of fabricating a billing period',()=>{
+ const f=fixture();f.context.data={...data,cycle:{configured:false},members:[{username:'Observed',cycleUsage:{cost:50},weeklyPercent:null,subscriptionPercent:null,observedWeeklyPercent:2/3,observedSubscriptionPercent:2/15}],total:{cycleUsage:{cost:150},weeklyPercent:null,subscriptionPercent:null,observedWeeklyPercent:2,observedSubscriptionPercent:.4}};
+ f.run('renderMembers(data)');const text=JSON.stringify(f.nodes);assert.match(text,/0.13%（已观测）/);assert.match(text,/0.40%（已观测）/);assert.match(text,/\$150.0000/);assert.match(text,/不冒充完整账期/);
 });

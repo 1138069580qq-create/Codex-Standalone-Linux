@@ -28,6 +28,19 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
     ]);})();
     try{await sampling;}finally{sampling=undefined;}
   }
+  // Reattach only to the configured, existing endpoint. Never launch Codex or replay writes.
+  let reconnectAllowed=true, reconnecting:Promise<void>|undefined, lastReconnectAt=0;
+  async function recoverReadConnection(who:Identity,projectId:string){
+    if(projectId!=='projectless')service.project(who,projectId);
+    else if(!who.uuid||!config.value.enabled)throw new ConsoleError(403,'PROJECT_FORBIDDEN','Project access denied.');
+    if(service.status(who).connected)return;
+    if(!reconnectAllowed)throw new ConsoleError(503,'CODEX_DISCONNECTED','管理员已断开连接，请管理员重新连接。');
+    if(reconnecting)return reconnecting;
+    if(Date.now()-lastReconnectAt<5000)throw new ConsoleError(503,'CODEX_OFFLINE','Codex 暂未连接，正在等待恢复。');
+    lastReconnectAt=Date.now();
+    const work=service.connect();reconnecting=work;
+    try{await work;}finally{if(reconnecting===work)reconnecting=undefined;}
+  }
   const streams = new Set<PassThrough>();
   const router = new Router({ prefix: "/api/codex" });
   function identity(c: Koa.Context): Identity {
@@ -146,7 +159,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
   );
   router.get(
     "/threads/:id",
-    wrap(async(c,who)=>{const projectId=param(c,"projectId",64);const snapshot=await service.snapshot(who,projectId,c.params.id);return {...snapshot,queue:queue.rows(who,projectId,c.params.id)};})
+    wrap(async(c,who)=>{const projectId=param(c,"projectId",64);await recoverReadConnection(who,projectId);const snapshot=await service.snapshot(who,projectId,c.params.id);return {...snapshot,connection:service.status(who),queue:queue.rows(who,projectId,c.params.id)};})
   );
   router.post(
     "/threads/:id/messages",
@@ -227,9 +240,12 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
   );
   router.post(
     "/account/limits/reset",
-    wrap((c, who) => {
+    wrap(async (c, who) => {
+      requireAdmin(who);rateLimit(who,"quota-reset",3);
       const b = body(c);
-      return service.consumeRateLimitReset(who, b.requestId, b.creditId);
+      const result=await service.consumeRateLimitReset(who,b.requestId,b.creditId);
+      if(result.rateLimits)usage.sample(result.rateLimits);
+      sampledAt=0;return result;
     })
   );
   router.get(
@@ -251,6 +267,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
         );
       // New ACLs apply before any new event can be forwarded. All old streams are closed.
       await config.save({...body(c),defaultOwnerId:config.value.defaultOwnerId,projects:body(c).projects?.map((p:any)=>({...p,ownerId:p.ownerId||config.value.defaultOwnerId}))});
+      reconnectAllowed=false;
       for (const stream of streams) stream.end();
       service.disconnect();
       return { ok: true };
@@ -261,6 +278,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
     wrap(async (_c, who) => {
       requireAdmin(who);
       rateLimit(who, "connect", 6);
+      reconnectAllowed=true;lastReconnectAt=0;
       await service.connect();
       return service.status(who);
     })
@@ -275,6 +293,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
           "TASKS_ACTIVE",
           "Stop or finish active tasks before disconnecting the backend."
         );
+      reconnectAllowed=false;
       service.disconnect();
       return { ok: true };
     })
@@ -286,6 +305,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
       const threadId = param(c, "threadId", 128);
       const cursor = c.get("Last-Event-ID") || param(c, "cursor");
       if (cursor.length > 256) throw new ConsoleError(400, "INVALID_CURSOR", "Event cursor is too long.");
+      await recoverReadConnection(who,projectId);
       await service.snapshot(who, projectId, threadId);
       const owned = [...streams].filter((s: any) => s.codexUserId === who.uuid).length;
       if (owned >= 6 || streams.size >= 100)
