@@ -1,6 +1,7 @@
 import {promises as fs,constants} from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import {createHash} from 'node:crypto';
 import {ConsoleError,isWithin,type ConfigStore,validateConfig} from './config';
 function directoryError(error: unknown, root: string): never {
   const code = (error as NodeJS.ErrnoException)?.code;
@@ -11,23 +12,34 @@ function directoryError(error: unknown, root: string): never {
   throw error;
 }
 /** Read-only: use the service account's writable home, never the filesystem root. */
-export async function defaultProjectDirectory(){
+export function accountDirectoryName(userId:string){return createHash("sha256").update(userId).digest("hex").slice(0,24);}
+export async function defaultProjectDirectory(userId?:string){
   const requested=os.homedir();
-  const root=await fs.realpath(requested).catch(e=>directoryError(e,requested));
+  let root=await fs.realpath(requested).catch(e=>directoryError(e,requested));
   if(root===path.parse(root).root||!(await fs.stat(root)).isDirectory())
     throw new ConsoleError(403,'PROJECT_BASE_UNAVAILABLE','当前服务账号没有可用的默认项目目录，请检查该账号的用户目录。');
   await fs.access(root,constants.W_OK|constants.X_OK).catch(e=>directoryError(e,root));
+  if(userId){
+    for(const segment of ["CodexProjects",accountDirectoryName(userId)]) {
+      const next=path.join(root,segment);
+      await fs.mkdir(next,{mode:0o700}).catch(e=>{if(e.code!=="EEXIST")directoryError(e,next);});
+      const info=await fs.lstat(next);
+      if(info.isSymbolicLink()||!info.isDirectory()||await fs.realpath(next)!==next)throw new ConsoleError(403,"PROJECT_BASE_REDIRECTED","个人项目目录不能是链接。");
+      root=next;
+    }
+    await fs.access(root,constants.W_OK|constants.X_OK).catch(e=>directoryError(e,root));
+  }
   return {root,separator:path.sep};
 }
 /** Filename-only requests are resolved server-side; legacy absolute-path clients remain supported. */
-export async function normalizeProjectCreation(input:any){
+export async function normalizeProjectCreation(input:any,userId?:string){
   if(!input||typeof input!=='object'||Array.isArray(input))throw new ConsoleError(400,'INVALID_PROJECT','请填写文件夹名称。');
   if(input.folderName===undefined)return input;
   const name=typeof input.folderName==='string'?input.folderName.trim():'';
   if(!name||name.length>100||Buffer.byteLength(name,'utf8')>240||name==='.'||name==='..'||name.includes('/')||name.includes('\\')||/[<>:"|?*\x00-\x1f\x7f]/.test(name)||/[.]$/.test(name)||/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name))
     throw new ConsoleError(400,'INVALID_FOLDER_NAME','请输入一个有效的文件夹名称，不要填写路径或使用特殊字符。');
   if(input.root!==undefined)throw new ConsoleError(400,'INVALID_PROJECT','固定目录模式不能另外指定完整路径。');
-  const directory=await defaultProjectDirectory();
+  const directory=await defaultProjectDirectory(userId);
   if(input.baseRoot!==directory.root)throw new ConsoleError(409,'PROJECT_BASE_CHANGED','默认目录已变化，请关闭后重新打开创建窗口。');
   return {...input,folderName:name,name,root:path.join(directory.root,name),createDirectory:true};
 }

@@ -5,6 +5,7 @@ import type Koa from "koa";
 import Router from "@koa/router";
 import { ConfigStore, ConsoleError, type Identity, requireAdmin, permissions } from "./backend/config";
 import { CommandReceipts } from "./backend/receipts";
+import { UsageLedger } from "./backend/usage";
 import { CodexConsoleService } from "./backend/service";
 import { listProjectFiles, openProjectDownload, uploadProjectFile, projectDiff } from "./backend/files";
 
@@ -15,6 +16,13 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
   const receipts = new CommandReceipts(path.join(path.dirname(config.file), "receipts.json"));
   await receipts.load();
   const service = factory ? factory(config, receipts) : new CodexConsoleService(config, receipts);
+  const usage=new UsageLedger(path.join(path.dirname(config.file),"usage.sqlite"));service.attachUsage(usage);
+  let sampledAt=0;let sampling:Promise<void>|undefined;
+  async function sampleQuota(who:Identity){
+    if(sampling)return sampling;if(Date.now()-sampledAt<300000)return;
+    sampledAt=Date.now();sampling=(async()=>{try{usage.sample(await service.rateLimits(who));}catch{/* Keep the last sample; never invent quota when the backend is unavailable. */}})();
+    try{await sampling;}finally{sampling=undefined;}
+  }
   const streams = new Set<PassThrough>();
   const router = new Router({ prefix: "/api/codex" });
   function identity(c: Koa.Context): Identity {
@@ -199,6 +207,11 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
       return service.discover(who);
     })
   );
+  router.get("/account/usage",wrap(async(_c,who)=>{await sampleQuota(who);return usage.overview(who);}));
+  router.get("/account/usage/details",wrap((c,who)=>{rateLimit(who,"usage-details",12);const range=param(c,"range",8)||"today",before=Number(param(c,"before",20))||undefined,offsetMinutes=Number(param(c,"offset",6))||0;if(!["today","7d","30d","all"].includes(range)||before!==undefined&&(!Number.isSafeInteger(before)||before<1)||!Number.isInteger(offsetMinutes)||Math.abs(offsetMinutes)>840)throw new ConsoleError(400,"INVALID_USAGE_FILTER","统计筛选条件无效。");return usage.details(who,{range,before,offsetMinutes,model:param(c,"model",128)||undefined,provider:param(c,"provider",128)||undefined});}));
+  router.get("/account/usage/records/:id",wrap((c,who)=>{const id=Number(c.params.id);if(!Number.isSafeInteger(id)||id<1)throw new ConsoleError(400,"INVALID_USAGE_ID","无效的记录 ID。");return usage.detail(who,id);}));
+  router.get("/account/usage/settings",wrap((_c,who)=>usage.settings(who)));
+  router.put("/account/usage/settings",wrap((c,who)=>{rateLimit(who,"usage-settings",3);return usage.configure(who,body(c));}));
   router.get(
     "/account/limits",
     wrap((_c, who) => service.rateLimits(who))
@@ -228,7 +241,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
           "Stop or finish active tasks before reconfiguring the backend."
         );
       // New ACLs apply before any new event can be forwarded. All old streams are closed.
-      await config.save(body(c));
+      await config.save({...body(c),defaultOwnerId:config.value.defaultOwnerId,projects:body(c).projects?.map((p:any)=>({...p,ownerId:p.ownerId||config.value.defaultOwnerId}))});
       for (const stream of streams) stream.end();
       service.disconnect();
       return { ok: true };
@@ -281,7 +294,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
       stream.write(": connected\n\n");
       const allowed = () => {
         const user = sessionIdentity(c);
-        try{return Boolean(config.value.enabled && user && service.project(user,projectId));}catch{return false;}
+        try{return Boolean(config.value.enabled && user && service.project(user,projectId) && (!usage.owner(threadId)||usage.owner(threadId)===user.uuid));}catch{return false;}
       };
       const write = (event: any) => {
         if (stream.destroyed || stream.writableEnded) return;
@@ -327,5 +340,5 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
     })
   );
   return { router, service, closeStreams() { for (const stream of streams) stream.destroy(); },
-    close() { for (const stream of streams) stream.destroy(); service.disconnect(); } };
+    close() { for (const stream of streams) stream.destroy(); service.disconnect(); usage.close(); } };
 }

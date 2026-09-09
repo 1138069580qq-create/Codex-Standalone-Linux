@@ -11,6 +11,8 @@ import {
   requireAdmin,
   permissions
 } from "./config";
+import { UsageLedger } from "./usage";
+import { accountDirectoryName } from "./projects";
 import { ReplayHub } from "./events";
 import {
   MAX_ITEM_CHARS,
@@ -28,6 +30,7 @@ import { normalizeRateLimits, type CodexRateLimits } from "./limits";
 import { readCatalog, publicCatalog, resolveExtensions, accessPolicy, readMcp, type Catalog } from "./extensions";
 
 interface Session {
+  root?:string;
   tokenUsage?: { total: number; last: number; contextWindow?: number };
   id: string;
   projectId: string;
@@ -52,6 +55,10 @@ interface Pending {
 }
 export class CodexConsoleService {
   readonly hub = new ReplayHub();
+  usage?: UsageLedger;
+  attachUsage(usage:UsageLedger){this.usage=usage;}
+  usageSnapshot(id:string){const owner=this.usage?.owner(id);return owner?this.usage!.metrics({uuid:owner,elevated:false},id):undefined;}
+  private projectQueue:Promise<unknown>=Promise.resolve();
   private catalogs = new Map<string, { at: number; value: Promise<Catalog> }>();
   private peer?: CodexRpcClient;
   private connecting?: Promise<void>;
@@ -83,7 +90,7 @@ export class CodexConsoleService {
       userId: identity.uuid,
       admin: identity.elevated,
       reason: this.peer?.connected ? undefined : this.reason,
-      capabilities:{projects:identity.elevated,projectless:identity.elevated,taskActions:true},
+      capabilities:{projects:!!identity.uuid,projectless:!!identity.uuid,taskActions:true},
       maxConcurrentTurns: this.config.value.maxConcurrentTurns
     };
   }
@@ -194,16 +201,16 @@ export class CodexConsoleService {
   ): Project {
     if (!this.config.value.enabled)
       throw new ConsoleError(409, "DISABLED", "Codex console is disabled.");
-    if(id==='projectless'){requireAdmin(identity);if(capability==='files')throw new ConsoleError(403,'PROJECTLESS_FILES','无项目对话不开放项目文件浏览。');return {id,name:'无项目对话',root:path.dirname(this.config.file)+'-chats',grants:[]};}
+    if(id==='projectless'){if(!identity.uuid)throw new ConsoleError(401,'LOGIN_REQUIRED','请登录。');if(capability==='files')throw new ConsoleError(403,'PROJECTLESS_FILES','无项目对话不开放项目文件浏览。');return {id,name:'无项目对话',root:path.dirname(this.config.file)+'-chats'+(identity.uuid===this.config.value.defaultOwnerId?'':'-'+accountDirectoryName(identity.uuid)),ownerId:identity.uuid,grants:[]};}
     return requireProject(this.config.value, identity, id, capability);
   }
   async refreshProjects(identity: Identity) { return this.projects(identity); }
-  async projectDirectory(identity: Identity) { requireAdmin(identity); return defaultProjectDirectory(); }
+  async projectDirectory(identity: Identity) { if(!identity.uuid)throw new ConsoleError(401,"LOGIN_REQUIRED","请登录。"); return defaultProjectDirectory(identity.uuid); }
   async createProject(identity:Identity,input:any):Promise<any>{
-    requireAdmin(identity);input=await normalizeProjectCreation(input);const prepared=await prepareProjectDirectory(this.config,input),canonical=prepared.root;
-    const existing=this.config.value.projects.find(p=>p.root===canonical);if(existing)return this.projects(identity).find(p=>p.id===existing.id);
-    const p={id:'p-'+createHash('sha256').update(canonical).digest('hex').slice(0,20),name:input.name.trim(),root:canonical,grants:[]};
-    return this.receipts.run(identity.uuid+':project:'+input.requestId,async markSubmitted=>{await materializeProjectDirectory(this.config,prepared,p.name);markSubmitted();await this.config.save({...this.config.value,projects:[...this.config.value.projects,p]});return this.projects(identity).find(v=>v.id===p.id);},{trackSubmission:true});
+    if(!identity.uuid)throw new ConsoleError(401,"LOGIN_REQUIRED","请登录。");if(input?.folderName===undefined)requireAdmin(identity);input=await normalizeProjectCreation(input,identity.uuid);const prepared=await prepareProjectDirectory(this.config,input),canonical=prepared.root;
+    const existing=this.config.value.projects.find(p=>p.root===canonical);if(existing){this.project(identity,existing.id,"send");return this.projects(identity).find(p=>p.id===existing.id);}
+    const p={id:'p-'+createHash('sha256').update(canonical).digest('hex').slice(0,20),name:input.name.trim(),root:canonical,ownerId:identity.uuid,grants:[]};
+    return this.receipts.run(identity.uuid+':project:'+input.requestId,async markSubmitted=>{await materializeProjectDirectory(this.config,prepared,p.name);const work=this.projectQueue.catch(()=>{}).then(async()=>{const prior=this.config.value.projects.find(v=>v.root===p.root);if(prior){this.project(identity,prior.id,"send");return this.projects(identity).find(v=>v.id===prior.id);}markSubmitted();await this.config.save({...this.config.value,projects:[...this.config.value.projects,p]});return this.projects(identity).find(v=>v.id===p.id);});this.projectQueue=work;return work;},{trackSubmission:true});
   }
   async taskAction(identity:Identity,projectId:string,id:string,action:string,input:any):Promise<any>{
     const project=this.project(identity,projectId,'send');const thread=await this.verifyThread(project,id);
@@ -223,7 +230,7 @@ export class CodexConsoleService {
       if(action==='compact')await rpc('thread/compact/start',{threadId:id});
       if(action==='review'){await this.open(project,id);await rpc('review/start',{threadId:id,target:input.target==='baseBranch'?{type:'baseBranch',branch:input.branch.trim()}:{type:'uncommittedChanges'},delivery:'inline'});}
       if(action==='feedback')await rpc('feedback/upload',{threadId:id,classification:'bug',reason:input.reason.trim(),includeLogs:false,extraLogFiles:[]});
-      if(action==='fork'||action==='side'){if(input.environment&&input.environment!=='same-directory')throw new ConsoleError(400,'INVALID_ENVIRONMENT','此连接仅支持当前目录分支。');const r=await rpc('thread/fork',{threadId:id,ephemeral:action==='side',threadSource:'user',excludeTurns:true,deferGoalContinuation:true});if(!await this.sameRoot(project,r.thread?.cwd))throw new ConsoleError(502,'FORK_OUTCOME_UNKNOWN','分支结果未知，请检查 Codex。');return {ok:true,thread:{id:r.thread.id,title:threadTitle(r.thread),status:runtimeStatus(r.thread)},temporary:action==='side'};}
+      if(action==='fork'||action==='side'){if(input.environment&&input.environment!=='same-directory')throw new ConsoleError(400,'INVALID_ENVIRONMENT','此连接仅支持当前目录分支。');const r=await rpc('thread/fork',{threadId:id,ephemeral:action==='side',threadSource:'user',excludeTurns:true,deferGoalContinuation:true});if(!await this.sameRoot(project,r.thread?.cwd))throw new ConsoleError(502,'FORK_OUTCOME_UNKNOWN','分支结果未知，请检查 Codex。');this.usage?.bind(r.thread.id,identity,projectId,r.thread.model,r.thread.modelProvider);return {ok:true,thread:{id:r.thread.id,title:threadTitle(r.thread),status:runtimeStatus(r.thread)},temporary:action==='side'};}
       return {ok:true};
     });
   }
@@ -239,16 +246,12 @@ export class CodexConsoleService {
           (s) => s.projectId === p.id && s.status === "running"
         ).length
       }));
-    if(identity.elevated)projects.push({id:"projectless",name:"无项目对话",root:"",permissions:{view:true,send:true,approve:true,files:false},kind:"projectless",activeCount:0});
+    if(identity.uuid)projects.push({id:"projectless",name:"无项目对话",root:"",permissions:{view:true,send:true,approve:true,files:false},kind:"projectless",activeCount:0});
     return projects;
   }
   async rateLimits(identity: Identity): Promise<CodexRateLimits> {
-    if (
-      !identity.elevated &&
-      !this.config.value.projects.some((p) => permissions(p, identity).view)
-    )
-      throw new ConsoleError(403, "PROJECT_FORBIDDEN", "No authorized projects.");
-    if (this.limitsCache && Date.now() - this.limitsCache.fetchedAt < 15_000)
+    if(!identity.uuid)throw new ConsoleError(401,"LOGIN_REQUIRED","请登录。");
+    if (this.limitsCache && Date.now() - this.limitsCache.fetchedAt < 300_000)
       return this.limitsCache;
     const raw = await this.rpc().request<any>("account/rateLimits/read", {});
     this.limitsCache = normalizeRateLimits(raw);
@@ -313,7 +316,7 @@ export class CodexConsoleService {
   async models(identity: Identity, _projectId?: string, _threadId?: string) {
     if (
       !this.config.value.projects.some((p) => permissions(p, identity).view) &&
-      !identity.elevated
+      !identity.uuid
     )
       throw new ConsoleError(403, "PROJECT_FORBIDDEN", "No authorized projects.");
     if (!this.modelsCache || Date.now() - this.modelsCache.at > 60000) {
@@ -406,6 +409,7 @@ export class CodexConsoleService {
       const session: Session = {
         id,
         projectId: project.id,
+        root:project.root,
         title: threadTitle(thread),
         status: runtimeStatus(thread),
         items: new Map(),
@@ -452,7 +456,8 @@ export class CodexConsoleService {
   }
   async snapshot(identity: Identity, projectId: string, id: string) {
     const project = this.project(identity, projectId);
-    await this.verifyThread(project, id);
+    const thread=await this.verifyThread(project, id);
+    this.usage?.bind(id,identity,projectId,thread.model,thread.modelProvider,false,thread.serviceTier);
     const session = await this.open(project, id);
     this.flushDeltas();
     return {
@@ -462,6 +467,7 @@ export class CodexConsoleService {
       turnId: session.turnId,
       items: [...session.items.values()],
       tokenUsage: session.tokenUsage,
+      metrics: this.usageSnapshot(id),
       pending: [...this.pending.values()]
         .filter((p) => p.threadId === id)
         .map((p) => this.publicPending(p)),
@@ -496,12 +502,14 @@ export class CodexConsoleService {
     const thread = result.thread;
     if (!(await this.sameRoot(project, thread.cwd)))
       throw new ConsoleError(502, "ROOT_MISMATCH", "Codex returned a different working directory.");
+    this.usage?.bind(thread.id,identity,projectId,thread.model,thread.modelProvider,true,thread.serviceTier);
     if (title?.trim())
       await this.rpc().request("thread/name/set", { threadId: thread.id, name: title.trim() });
     this.evict();
     this.sessions.set(thread.id, {
       id: thread.id,
       projectId,
+      root:project.root,
       title: title?.trim() || threadTitle(thread),
       status: runtimeStatus(thread),
       items: new Map(),
@@ -587,7 +595,7 @@ export class CodexConsoleService {
       if (
         runtimeStatus(thread) === "running" ||
         session.status === "running" ||
-        this.reservations.has(projectId)
+        this.reservations.has(project.root)
       )
         throw new ConsoleError(
           409,
@@ -605,14 +613,14 @@ export class CodexConsoleService {
           "The configured concurrent task limit is reached."
         );
       if (
-        [...this.sessions.values()].some((s) => s.projectId === projectId && s.status === "running")
+        [...this.sessions.values()].some((s) => s.root === project.root && s.status === "running")
       )
         throw new ConsoleError(
           409,
           "PROJECT_BUSY",
           "Only one task may modify this project at a time. Use a separate worktree project for parallel edits."
         );
-      this.reservations.add(projectId);
+      this.reservations.add(project.root);
       try {
         const running = await this.rpc().request<any>("thread/list", {
           cwd: project.root,
@@ -626,6 +634,7 @@ export class CodexConsoleService {
             "A task is already running in this project, possibly in another Codex client."
           );
         const peer = this.rpc();
+        this.usage?.bind(id,identity,projectId,model.model,thread.modelProvider,false,thread.serviceTier);
         markSubmitted();
         const result = await peer.request<any>("turn/start", {
           threadId: id,
@@ -651,11 +660,11 @@ export class CodexConsoleService {
           type: "status",
           projectId,
           threadId: id,
-          payload: { status: session.status, turnId: session.turnId }
+          payload: { status: session.status, turnId: session.turnId,metrics:this.usageSnapshot(id) }
         });
         return { turnId: result.turn.id, status: session.status };
       } finally {
-        this.reservations.delete(projectId);
+        this.reservations.delete(project.root);
       }
     }, { trackSubmission: true });
   }
@@ -808,13 +817,14 @@ export class CodexConsoleService {
     }
     if (method === "skills/changed") { this.catalogs.clear(); return; }
     const id = p.threadId || p.thread?.id;
+    if(id)this.usage?.observe(id,method,p);
     const session = this.sessions.get(id);
     if (!session) return;
     session.touched = Date.now();
     if (method === "thread/tokenUsage/updated") {
       const n=(v:any)=>Number.isFinite(v)&&v>=0?Math.floor(v):0;
       session.tokenUsage={total:n(p.tokenUsage?.total?.totalTokens),last:n(p.tokenUsage?.last?.totalTokens),contextWindow:n(p.tokenUsage?.modelContextWindow)||undefined};
-      this.hub.publish({type:"status",projectId:session.projectId,threadId:id,payload:{status:session.status,tokenUsage:session.tokenUsage}});
+      this.hub.publish({type:"status",projectId:session.projectId,threadId:id,payload:{status:session.status,tokenUsage:session.tokenUsage,metrics:this.usageSnapshot(id)}});
       return;
     }
     if (method === "error") {
@@ -861,7 +871,7 @@ export class CodexConsoleService {
         type: "status",
         projectId: session.projectId,
         threadId: id,
-        payload: { status: session.status, turnId: session.turnId }
+        payload: { status: session.status, turnId: session.turnId,metrics:this.usageSnapshot(id) }
       });
       return;
     }

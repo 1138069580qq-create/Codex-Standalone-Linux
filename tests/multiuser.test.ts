@@ -229,14 +229,14 @@ test("two distinct identities only see and act on their own exclusive projects",
       .projects(alice)
       .map((project) => project.id)
       .sort(),
-    ["project-one", "shared"]
+    ["project-one", "projectless", "shared"]
   );
   assert.deepEqual(
     service
       .projects(bob)
       .map((project) => project.id)
       .sort(),
-    ["project-two", "shared"]
+    ["project-two", "projectless", "shared"]
   );
 
   const rpcBeforeForbiddenCalls = peer.requests.length;

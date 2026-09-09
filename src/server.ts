@@ -21,6 +21,11 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
   const users = new UserStore(path.join(options.dataDir, "users.json")); await users.load();
   if (!users.users.some(u => u.admin)) throw new Error("No administrator. Run npm run user:add -- --username admin --admin first.");
   const config = new ProtectedConfigStore(path.join(options.dataDir, "config.json")); await config.load();
+  // Preserve old data and assign an explicit owner before serving any account.
+  const defaultOwnerId=config.value.defaultOwnerId||users.users.find(u=>u.admin)!.id;
+  if(!config.value.defaultOwnerId||config.value.projects.some(p=>!p.ownerId)) {
+    await config.save({...config.value,defaultOwnerId,projects:config.value.projects.map(p=>({...p,ownerId:p.ownerId||(p.grants.filter(g=>g.permissions.includes("view")).length===1?p.grants.find(g=>g.permissions.includes("view"))!.userId:defaultOwnerId)}))});
+  }
   const sessions = new Sessions(); const limiter = new RateLimiter();
   const cookieName = options.secureCookies ? "__Host-codex_webui" : "codex_webui";
   // A normal-cost dummy hash prevents the missing-user path becoming a username oracle.
@@ -122,7 +127,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
   app.use(auth.routes()).use(auth.allowedMethods());
   app.use(routes.router.routes()).use(routes.router.allowedMethods());
   const assets = new Map<string, { raw: Buffer; gzip: Buffer; br: Buffer; etag: string; type: string }>();
-  const allowed = [["/", "index.html", "text/html"], ["/app.js", "app.js", "text/javascript"], ["/state.js", "state.js", "text/javascript"], ["/style.css", "style.css", "text/css"]];
+  const allowed = [["/", "index.html", "text/html"], ["/app.js", "app.js", "text/javascript"], ["/state.js", "state.js", "text/javascript"], ["/usage.js", "usage.js", "text/javascript"], ["/style.css", "style.css", "text/css"]];
   const assetVersions = new Map<string,string>();
   for(const [route,filename] of allowed) if(route !== "/") assetVersions.set(route,createHash("sha256").update(await fs.readFile(path.join(staticDir,filename))).digest("hex").slice(0,12));
   for (const [route, filename, type] of allowed) {

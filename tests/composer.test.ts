@@ -46,7 +46,7 @@ function attached() {
 test('desktop mode hides new-task and disables APIs the bridge does not support',()=>{
   const {c,S,elements}=attached();c.controls();
   assert.equal(elements['new-thread'].hidden,true);assert.equal(elements['new-thread'].disabled,true);
-  assert.equal(elements['sidebar-plugins'].disabled,true);assert.equal(elements['refresh-quota'].hidden,true);
+  assert.equal(elements['sidebar-plugins'].disabled,true);assert.equal(elements['refresh-quota'].hidden,false);
   assert.equal(elements.settings.hidden,true);assert.equal(elements.send.disabled,false);
   for(const id of ['new','skills','plugins','mcp','goal'])assert.equal(c.commandAvailable({id}),false,id);
   for(const id of ['upload','references','plan','model','permissions','status'])assert.equal(c.commandAvailable({id}),true,id);
@@ -93,9 +93,9 @@ test('desktop failed send retains its draft and request ID for a user-driven ret
   assert.ok(calls.every(v=>v.url==='/api/codex/threads/desktop-task/messages'));
 });
 test('unsupported desktop quota and extension catalogs do not issue failing API calls',async()=>{
-  const {c,S,elements,calls}=attached();await c.loadQuota();const catalog=await c.loadCatalog();
+  const {c,S,elements,calls}=attached();let localStatisticsLoads=0;c.CodexUsage={load:async()=>{localStatisticsLoads++;}};await c.loadQuota();const catalog=await c.loadCatalog();
   assert.equal(calls.length,0);assert.equal(catalog.entries.length,0);
-  assert.equal(S.catalogProject,'demo');assert.match(elements['quota-content'].textContent,/Codex 桌面/);
+  assert.equal(S.catalogProject,'demo');assert.equal(localStatisticsLoads,1,'local usage stays available even without upstream quota support');
 });
 test('ordinary app-server mode retains new-task and extension commands',async()=>{
   const state=setup();const {c,S,elements}=state;S.thread={id:'old'};

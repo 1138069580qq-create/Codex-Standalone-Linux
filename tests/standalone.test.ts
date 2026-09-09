@@ -41,6 +41,7 @@ test("public binding requires explicit HTTPS origin; data-directory projects are
 
 test("production HTTP: auth, CSRF, origin, ACL, static compression, ETag, no secret disclosure", async t => {
   const directory=await mkdtemp(path.join(os.tmpdir(),'webui-http-'));
+  const isolatedHome=await mkdtemp(path.join(os.tmpdir(),'webui-http-home-'));t.mock.method(os,'homedir',()=>isolatedHome);
   const store=new UserStore(path.join(directory,'users.json'));
   const admin=await store.upsert({username:'admin',password:'long-test-password',admin:true});
   await store.upsert({username:'viewer',password:'long-test-password',admin:false});
@@ -70,7 +71,7 @@ test("production HTTP: auth, CSRF, origin, ACL, static compression, ETag, no sec
   response=await call('/api/login',{username:'viewer',password:'long-test-password'});assert.equal(response.status,200);cookie=response.headers.get('set-cookie')!.split(';')[0];csrf=(await response.json() as any).csrf;
   response=await call('/api/admin/users');assert.equal(response.status,403);
   response=await call('/api/codex/admin/config');assert.equal(response.status,403);
-  response=await call('/api/codex/projects');assert.deepEqual(await response.json(),[]);
+  response=await call('/api/codex/projects');assert.deepEqual((await response.json() as any[]).map(p=>p.id),['projectless']);
   response=await call('/api/codex/files?projectId=secret&path=auth.json');assert.ok([403,409].includes(response.status));
   response=await call('/api/logout',{});assert.equal(response.status,200);
   response=await call('/api/session');assert.equal(response.status,401);

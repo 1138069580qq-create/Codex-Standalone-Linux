@@ -15,26 +15,26 @@ async function fixture(t:any){
  const service=new CodexConsoleService(config,new CommandReceipts(path.join(data,'receipts.json')));t.after(()=>service.disconnect());
  return {service,config,base,home:await fs.realpath(home)};
 }
-test('admin receives the service home prefix and creates a project by one folder name',async t=>{
+test('each account receives its own writable prefix and creates a project by one folder name',async t=>{
  const {service,config,home}=await fixture(t);
- await assert.rejects(service.projectDirectory({uuid:'viewer',elevated:false}),code('ADMIN_REQUIRED'));
- const directory=await service.projectDirectory(admin);assert.deepEqual(directory,{root:home,separator:path.sep});assert.deepEqual(await fs.readdir(home),[]);
- const body={folderName:'文件夹1',baseRoot:home,confirmDirectory:true,requestId:'fixed-folder-create-123'};
- const result=await service.createProject(admin,body);assert.equal(result.root,path.join(home,'文件夹1'));assert.equal(result.name,'文件夹1');
+ await assert.rejects(service.projectDirectory({uuid:'',elevated:false}),code('LOGIN_REQUIRED'));
+ const directory=await service.projectDirectory(admin);const viewer=await service.projectDirectory({uuid:'viewer',elevated:false});assert.notEqual(directory.root,viewer.root);assert.ok(directory.root.startsWith(home+path.sep));assert.equal(directory.separator,path.sep);
+ const body={folderName:'文件夹1',baseRoot:directory.root,confirmDirectory:true,requestId:'fixed-folder-create-123'};
+ const result=await service.createProject(admin,body);assert.equal(result.root,path.join(directory.root,'文件夹1'));assert.equal(result.name,'文件夹1');
  assert.equal((await fs.stat(result.root)).isDirectory(),true);assert.equal((await service.createProject(admin,body)).id,result.id);assert.equal(config.value.projects.length,1);
 });
 test('folder creation rejects traversal, full paths, stale prefixes and mixed path modes without creating directories',async t=>{
- const {service,home}=await fixture(t),body={baseRoot:home,confirmDirectory:true,requestId:'reject-folder-123'};
+ const {service,home}=await fixture(t),directory=await service.projectDirectory(admin),body={baseRoot:directory.root,confirmDirectory:true,requestId:'reject-folder-123'};
  for(const folderName of ['','.', '..','../escape','/1','a/b','a\\b','C:\\outside','bad:name','NUL','CON.txt','trailing.','a\0b','界'.repeat(100)])
   await assert.rejects(service.createProject(admin,{...body,folderName}),code('INVALID_FOLDER_NAME'));
  await assert.rejects(service.createProject(admin,{...body,folderName:'ok',baseRoot:path.dirname(home)}),code('PROJECT_BASE_CHANGED'));
  await assert.rejects(service.createProject(admin,{...body,folderName:'ok',root:path.join(home,'other')}),code('INVALID_PROJECT'));
- assert.deepEqual(await fs.readdir(home),[]);
+ assert.deepEqual(await fs.readdir(directory.root),[]);
 });
 test('fixed prefixes do not follow an existing folder redirect outside the prefix',async t=>{
  const {service,home,base}=await fixture(t),outside=path.join(base,'outside');await fs.mkdir(outside);
- await fs.symlink(outside,path.join(home,'redirect'),'junction');
- await assert.rejects(service.createProject(admin,{folderName:'redirect',baseRoot:home,confirmDirectory:true,requestId:'redirect-folder-123'}),code('PROJECT_PATH_REDIRECTED'));
+ const directory=await service.projectDirectory(admin);await fs.symlink(outside,path.join(directory.root,'redirect'),'junction');
+ await assert.rejects(service.createProject(admin,{folderName:'redirect',baseRoot:directory.root,confirmDirectory:true,requestId:'redirect-folder-123'}),code('PROJECT_PATH_REDIRECTED'));
  assert.deepEqual(await fs.readdir(outside),[]);
 });
 test('an unwritable home or filesystem root is not advertised as a usable default',async t=>{

@@ -20,6 +20,7 @@ export interface Identity {
   role?: number;
 }
 export interface Project {
+  ownerId?: string;
   desktopProjectId?: string;
   desktopSavedProjectId?: string;
   id: string;
@@ -28,6 +29,7 @@ export interface Project {
   grants: Array<{ userId: string; permissions: Capability[] }>;
 }
 export interface ConsoleConfig {
+  defaultOwnerId?: string;
   enabled: boolean;
   transport: {
     type: "unix" | "websocket";
@@ -147,10 +149,12 @@ export async function validateConfig(value: unknown): Promise<ConsoleConfig> {
       users.add(g.userId);
       return { userId: g.userId, permissions: Array.from(new Set(g.permissions)) };
     });
-    projects.push({ id: p.id, name: p.name.trim(), root: root!, grants, ...(typeof p.desktopProjectId==='string' && /^[-a-zA-Z0-9_]{1,128}$/.test(p.desktopProjectId)?{desktopProjectId:p.desktopProjectId}:{}), ...(typeof p.desktopSavedProjectId==='string' && /^[-a-zA-Z0-9_]{1,128}$/.test(p.desktopSavedProjectId)?{desktopSavedProjectId:p.desktopSavedProjectId}:{}) });
+    if(p.ownerId!==undefined && (typeof p.ownerId!=="string" || !/^[-a-zA-Z0-9_]{1,128}$/.test(p.ownerId))) invalid("Invalid project owner.");
+    projects.push({ ...(p.ownerId?{ownerId:p.ownerId}:{}), id: p.id, name: p.name.trim(), root: root!, grants, ...(typeof p.desktopProjectId==='string' && /^[-a-zA-Z0-9_]{1,128}$/.test(p.desktopProjectId)?{desktopProjectId:p.desktopProjectId}:{}), ...(typeof p.desktopSavedProjectId==='string' && /^[-a-zA-Z0-9_]{1,128}$/.test(p.desktopSavedProjectId)?{desktopSavedProjectId:p.desktopSavedProjectId}:{}) });
     ids.add(p.id);
   }
   return {
+    ...(typeof input.defaultOwnerId==="string" && /^[-a-zA-Z0-9_]{1,128}$/.test(input.defaultOwnerId)?{defaultOwnerId:input.defaultOwnerId}:{}),
     enabled: input.enabled,
     transport: {
       type: tr.type,
@@ -163,6 +167,8 @@ export async function validateConfig(value: unknown): Promise<ConsoleConfig> {
 }
 export function permissions(project: Project, identity: Identity): Record<Capability, boolean> {
   const list =
+    project.ownerId && project.ownerId !== identity.uuid ? [] :
+    project.ownerId === identity.uuid ? (project.grants.find(g=>g.userId===identity.uuid)?.permissions||capabilities) :
     identity.uuid && identity.elevated
       ? capabilities
       : project.grants.find((g) => g.userId === identity.uuid)?.permissions || [];
