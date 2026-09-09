@@ -32,7 +32,7 @@
       item.text = textPrefix(item.text + p.text, 65536);
     } else if (event.type === 'approval') state.pending.set(p.id, p);
     else if (event.type === 'approvalResolved') state.pending.delete(p.id);
-    else if (event.type === 'status') { state.status = p.status || state.status; if('tokenUsage' in p)state.tokenUsage=p.tokenUsage;if('turnId' in p)state.turnId=p.turnId; }
+    else if (event.type === 'status') { state.status = p.status || state.status; if(Array.isArray(p.turns))state.turns=p.turns; if('tokenUsage' in p)state.tokenUsage=p.tokenUsage;if('turnId' in p)state.turnId=p.turnId; }
     let size = [...state.items.values()].reduce((sum, v) => sum + v.text.length, 0);
     while (state.items.size > 200 || size > 512 * 1024) {
       const key = state.items.keys().next().value;

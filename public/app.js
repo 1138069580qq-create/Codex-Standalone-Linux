@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const S = { user:null, csrf:'', projects:[], models:[], project:null, thread:null, threads:[], next:null,
-  items:new Map(), pending:new Map(), status:'idle', cursor:'', stream:null, epoch:0, retry:0,
+  items:new Map(), turns:[], pending:new Map(), status:'idle', cursor:'', stream:null, epoch:0, retry:0,
   timer:null, streamStableTimer:null, hiddenTimer:null, renderTimer:null, nodes:new Map(), attachments:[], bytes:0, truncated:false,
   connected:false, newTask:false, taskCreation:null, creationTimer:null, checkingCreation:false, attachedThreadId:null, capabilities:{}, panel:'quota', filePath:'.', syncing:null, sending:false, attempt:null, creationId:null,
   selected:[], references:[], goalDraft:'', accessConfirmed:false, tokenUsage:null, turnId:null, queueCount:0, threadSettings:null, settingsOverrides:{}, modelRequest:null, modelsUnavailable:false,
@@ -51,7 +51,7 @@ const q = params => new URLSearchParams(params).toString();
 const apiProject = (route, extra={}) => `/api/codex/${route}?${q({projectId:S.project?.id||'',...extra})}`;
 function permission(name) { return !!S.project?.permissions?.[name]; }
 function closeStream() { clearTimeout(S.streamStableTimer);S.streamStableTimer=null; clearTimeout(S.timer); S.timer=null; S.stream?.close(); S.stream=null; }
-function clearConversation() { globalThis.CodexFeatures?.reset(); globalThis.CodexQueue?.reset();S.turnId=null;S.queueCount=0;globalThis.CodexUsage?.metrics(null); clearTimeout(S.creationTimer);S.creationTimer=null;S.newTask=false;S.newTaskConfirmed=false;S.modelRequest=null;S.modelsUnavailable=false;S.taskCreation=null;S.epoch++; closeStream(); if(!S.sideOrigin)$('side-context').hidden=true; clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='新任务'; S.selected=[]; S.references=[]; S.goalDraft=''; S.accessConfirmed=false; S.tokenUsage=null; S.threadSettings=null; S.settingsOverrides={}; $('access').value='default'; closeMenu(); $('prompt').value=''; renderAttachments(); controls(); }
+function clearConversation() { globalThis.CodexFeatures?.reset(); globalThis.CodexQueue?.reset();S.turnId=null;S.turns=[];S.queueCount=0;globalThis.CodexUsage?.metrics(null); clearTimeout(S.creationTimer);S.creationTimer=null;S.newTask=false;S.newTaskConfirmed=false;S.modelRequest=null;S.modelsUnavailable=false;S.taskCreation=null;S.epoch++; closeStream(); if(!S.sideOrigin)$('side-context').hidden=true; clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='新任务'; S.selected=[]; S.references=[]; S.goalDraft=''; S.accessConfirmed=false; S.tokenUsage=null; S.threadSettings=null; S.settingsOverrides={}; $('access').value='default'; closeMenu(); $('prompt').value=''; renderAttachments(); controls(); }
 function loggedOut() { globalThis.CodexUsage?.reset(); S.sideOrigin=null;$('side-context').hidden=true;$('side-history').replaceChildren();clearConversation(); S.user=null; S.csrf=''; S.connected=false; S.attachedThreadId=null; S.capabilities={}; S.projects=[]; S.threads=[]; S.project=null; S.models=[]; S.items.clear(); $('workspace').hidden=true; $('login-view').hidden=false; $('settings-dialog').close(); $('new-thread-dialog').close(); for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close(); setAuthMode('login'); S.catalog=null; }
 function supports(capability) {
   if(capability==='createThread' && S.attachedThreadId)return false;
@@ -254,7 +254,7 @@ async function syncSnapshot() {
     const result=await api(apiProject(`threads/${encodeURIComponent(id)}`));
     if(epoch!==S.epoch) return;
     if(result.connection){S.connected=!!result.connection.connected;S.capabilities=result.connection.capabilities||S.capabilities;}
-    S.items=new Map(result.items.map(v=>[v.id,v])); S.pending=new Map(result.pending.map(v=>[v.id,v]));
+    S.items=new Map(result.items.map(v=>[v.id,v])); S.turns=result.turns||[]; S.pending=new Map(result.pending.map(v=>[v.id,v]));
     globalThis.CodexUsage?.metrics(result.metrics);S.cursor=result.cursor; S.tokenUsage=result.tokenUsage||null; S.turnId=result.turnId||null;globalThis.CodexQueue?.show(result.queue||[]); if(result.settings)applyThreadSettings(result.settings); S.status=result.status; S.truncated=result.truncated; S.nodes.clear(); $('timeline').replaceChildren($('empty')); $('empty').hidden=true;
     renderTimeline(); renderApprovals(); controls(); openStream();
     if(result.truncated) notice('仅显示最近记录。');
@@ -283,7 +283,7 @@ function openStream() {
       if(data.type==='queue')globalThis.CodexQueue?.refresh();
       if(data.type==='approval'||data.type==='approvalResolved') renderApprovals();
       if(data.type==='status') { if(data.payload.metrics)globalThis.CodexUsage?.metrics(data.payload.metrics);if(data.payload.settings)applyThreadSettings(data.payload.settings); if(data.payload.modelsChanged)loadModels().catch(e=>notice(e.message)); controls(); const row=S.threads.find(t=>t.id===S.thread?.id); if(row){row.status=S.status;renderThreads();} }
-      if(data.type==='item'||data.type==='delta') scheduleRender();
+      if(data.type==='item'||data.type==='delta'||data.type==='status') scheduleRender();
     } catch { syncSnapshot().catch(e=>toast(e.message,true)); }
   });
   stream.onerror=()=>{

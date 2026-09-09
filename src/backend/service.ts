@@ -23,7 +23,7 @@ import {
   normalizeItem,
   runtimeStatus,
   threadTitle,
-  TimelineItem
+  TimelineItem, turnTiming, type TurnTiming
 } from "./normalize";
 import { prepareProjectDirectory,materializeProjectDirectory,normalizeProjectCreation,defaultProjectDirectory } from './projects';
 import { CommandReceipts } from "./receipts";
@@ -44,6 +44,7 @@ interface Session {
   turnId?: string;
   lastCompletedTurnId?: string;
   items: Map<string, TimelineItem>;
+  turns: Map<string, TurnTiming>;
   truncated: boolean;
   touched: number;
 }
@@ -402,6 +403,12 @@ export class CodexConsoleService {
       );
     return thread;
   }
+  private recordTurn(session:Session,turn:any,now?:number){
+    if(!turn?.id)return;const previous=session.turns.get(turn.id);
+    if(previous?.finishedAt!==undefined&&turn.status==='inProgress')return;
+    session.turns.set(turn.id,turnTiming(turn,previous,now));
+    while(session.turns.size>40)session.turns.delete(session.turns.keys().next().value!);
+  }
   private trim(session: Session): void {
     let size = [...session.items.values()].reduce((n, i) => n + i.text.length, 0);
     while (session.items.size > 200 || size > 512 * 1024) {
@@ -441,6 +448,7 @@ export class CodexConsoleService {
         title: threadTitle(thread),
         status: runtimeStatus(thread),
         items: new Map(),
+        turns: new Map(),
         truncated: false,
         touched: Date.now()
       };
@@ -463,6 +471,7 @@ export class CodexConsoleService {
         session.items.clear();
         for (const turn of [...(history.data || [])].reverse()) {
           if (turn.status === "inProgress") session.turnId = turn.id;
+          if(!session.turns.has(turn.id))session.turns.set(turn.id,turnTiming(turn));
           for (const raw of turn.items || []) {
             const item = normalizeItem(raw, this.config.value.projects.find(project=>project.id===session.projectId)?.root, turn.id);
             session.items.set(item.id, item);
@@ -505,6 +514,7 @@ export class CodexConsoleService {
       status: session.status,
       turnId: session.turnId,
       items: [...session.items.values()],
+      turns: [...session.turns.values()],
       tokenUsage: session.tokenUsage,
       metrics: this.usageSnapshot(id),
       pending: [...this.pending.values()]
@@ -552,6 +562,7 @@ export class CodexConsoleService {
       title: title?.trim() || threadTitle(thread),
       status: runtimeStatus(thread),
       items: new Map(),
+        turns: new Map(),
       touched: Date.now(),
       truncated: false
     });
@@ -693,13 +704,14 @@ export class CodexConsoleService {
           }
         });
         session.turnId = result.turn.id;
+        if(session.lastCompletedTurnId!==result.turn.id)this.recordTurn(session,result.turn,Date.now());
         if (session.lastCompletedTurnId !== result.turn.id)
           session.status = result.turn.status === "inProgress" ? "running" : result.turn.status;
         this.hub.publish({
           type: "status",
           projectId,
           threadId: id,
-          payload: { status: session.status, turnId: session.turnId,metrics:this.usageSnapshot(id) }
+          payload: { status: session.status, turnId: session.turnId,turns:[...session.turns.values()],metrics:this.usageSnapshot(id) }
         });
         outcome = session.status === "running" ? "running" : "complete"; slot.finish(outcome, result.turn.id);
         return { turnId: result.turn.id, status: session.status };
@@ -877,7 +889,7 @@ export class CodexConsoleService {
         id: `error-${randomUUID()}`,
         type: "other",
         text: String(p.error?.message || "Codex reported an error.").slice(0, MAX_ITEM_CHARS),
-        status: "failed"
+        status: "failed",turnId:session.turnId
       };
       session.items.set(item.id, item);
       this.trim(session);
@@ -898,7 +910,7 @@ export class CodexConsoleService {
               ? "failed"
               : "idle"
             : runtimeStatus({ status: p.status });
-      if (p.turn?.id) session.turnId = p.turn.id;
+      if (p.turn?.id) {session.turnId = p.turn.id;this.recordTurn(session,p.turn,Date.now());}
       if (method === "turn/completed") session.lastCompletedTurnId = p.turn?.id;
       if (method === "turn/completed") {
         for (const [key, pending] of this.pending)
@@ -916,7 +928,7 @@ export class CodexConsoleService {
         type: "status",
         projectId: session.projectId,
         threadId: id,
-        payload: { status: session.status, turnId: session.turnId,metrics:this.usageSnapshot(id) }
+        payload: { status: session.status, turnId: session.turnId,turns:[...session.turns.values()],metrics:this.usageSnapshot(id) }
       });
       return;
     }
@@ -940,6 +952,7 @@ export class CodexConsoleService {
       if (!item) {
         item = {
           id: p.itemId,
+          turnId: p.turnId||session.turnId,
           type: method.includes("agentMessage")
             ? "agentMessage"
             : method.includes("plan")

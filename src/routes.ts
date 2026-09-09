@@ -189,7 +189,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
       listProjectFiles(await root(who, param(c, "projectId", 64), "files"), param(c, "path") || ".")
     )
   );
-  const fileFeatures=installFileRoutes(router,{root,wrap,project:(who,id)=>service.project(who,id,"files")});
+  const fileFeatures=installFileRoutes(router,{root,wrap,project:(who,id)=>service.project(who,id,"files"),snapshot:(who,id,threadId)=>service.snapshot(who,id,threadId)});
   router.post(
     "/files",
     wrap(async (c, who) => {

@@ -4,7 +4,7 @@ import { MAIN_TURN_LIMIT } from './concurrency';
 import { ConsoleError, requireAdmin, type Project, type ConfigStore, type Identity } from './config';
 import { CommandReceipts } from './receipts';
 import { DesktopIpc } from './desktop-ipc';
-import { normalizeItem, runtimeStatus, type TimelineItem } from './normalize';
+import { normalizeItem, runtimeStatus, turnTiming, type TurnTiming, type TimelineItem } from './normalize';
 import { attachmentPath, projectReference } from './files';
 import { readCatalog, publicCatalog, resolveExtensions, readMcp, type Catalog } from './extensions';
 import type { DesktopBridgeApi } from './desktop-bridge';
@@ -14,6 +14,7 @@ import { DesktopModelCatalog, desktopSettings, desktopUsage, desktopOverrides } 
 export class DesktopSessionService extends CodexConsoleService {
   private items=new Map<string,TimelineItem>();
   private lastStatus='idle';
+  private turnTimes=new Map<string,TurnTiming>();
   private gateStatus=''; private gateTurn='';
   protected override async readMainTurnStates(){return [{id:this.desktop.threadId,status:this.desktop.state?.threadRuntimeStatus}];}
   private updateTimer?:NodeJS.Timeout;
@@ -64,6 +65,8 @@ export class DesktopSessionService extends CodexConsoleService {
         this.usageItemStates.set(raw.id,signature);
       }if(!running)this.usage.observe(this.desktop.threadId,"turn/completed",{turn:{id:turnId,status:latest.status||"completed"}});}
     }
+    const history=this.turns().slice(-20);
+    const nextTimes=new Map<string,TurnTiming>();for(const turn of history){const id=turn.turnId||turn.id;nextTimes.set(id,turnTiming({...turn,id},this.turnTimes.get(id)));}this.turnTimes=nextTimes;
     const next=new Map<string,TimelineItem>();
     for(const turn of this.turns().slice(-20))for(const raw of turn.items||[]){
       // Render only public message/tool fields, never private reasoning content or raw tool arguments.
@@ -72,15 +75,15 @@ export class DesktopSessionService extends CodexConsoleService {
     }
     let size=[...next.values()].reduce((n,v)=>n+v.text.length,0);
     while(next.size>200||size>512*1024){const key=next.keys().next().value!;size-=next.get(key)!.text.length;next.delete(key);}
-    for(const [id,item]of next){const prior=this.items.get(id);const sameMeta=prior&&JSON.stringify([prior.durationMs,prior.images,prior.turnId])===JSON.stringify([item.durationMs,item.images,item.turnId]);if(prior?.text===item.text&&prior.status===item.status&&sameMeta)continue;
+    for(const [id,item]of next){const prior=this.items.get(id);const sameMeta=prior&&JSON.stringify([prior.durationMs,prior.images,prior.turnId,prior.files,prior.phase])===JSON.stringify([item.durationMs,item.images,item.turnId,item.files,item.phase]);if(prior?.text===item.text&&prior.status===item.status&&sameMeta)continue;
       if(prior&&sameMeta&&item.text.startsWith(prior.text)&&item.status===prior.status)this.hub.publish({type:'delta',projectId:project.id,threadId:this.desktop.threadId,payload:{itemId:id,offset:prior.text.length,text:item.text.slice(prior.text.length)}});
       else this.hub.publish({type:'item',projectId:project.id,threadId:this.desktop.threadId,payload:item});
     }
     this.items=next;
     const status=runtimeStatus({status:this.desktop.state.threadRuntimeStatus});
     if(status!==this.gateStatus||String(turnId||'')!==this.gateTurn){this.gateStatus=status;this.gateTurn=String(turnId||'');this.turnGate.observe(this.desktop.threadId,status,turnId);}
-    const settings=desktopSettings(this.desktop.state),tokenUsage=desktopUsage(this.desktop.state),signature=JSON.stringify({settings,tokenUsage});
-    if(status!==this.lastStatus||signature!==this.settingsSignature){this.lastStatus=status;this.settingsSignature=signature;this.hub.publish({type:'status',projectId:project.id,threadId:this.desktop.threadId,payload:{status,turnId:this.turns().at(-1)?.turnId,settings,tokenUsage,metrics:this.usageSnapshot(this.desktop.threadId)}});}
+    const settings=desktopSettings(this.desktop.state),tokenUsage=desktopUsage(this.desktop.state),signature=JSON.stringify({settings,tokenUsage,turns:[...this.turnTimes.values()]});
+    if(status!==this.lastStatus||signature!==this.settingsSignature){this.lastStatus=status;this.settingsSignature=signature;this.hub.publish({type:'status',projectId:project.id,threadId:this.desktop.threadId,payload:{status,turnId:this.turns().at(-1)?.turnId||this.turns().at(-1)?.id,turns:[...this.turnTimes.values()],settings,tokenUsage,metrics:this.usageSnapshot(this.desktop.threadId)}});}
   }
   override get hasActiveWork(){return runtimeStatus({status:this.desktop.state?.threadRuntimeStatus})==='running';}
   protected override async readAccountMetadata(){if(!this.bridge?.available)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','账户接口未连接。');return this.bridge.rpc('account/read',{refreshToken:false});}
@@ -91,7 +94,7 @@ export class DesktopSessionService extends CodexConsoleService {
   override disconnect(){this.invalidateSubscription();if(this.updateTimer)clearTimeout(this.updateTimer);this.updateTimer=undefined;this.catalog.close();this.desktop.close();}
   override status(identity:Identity):any {return {configured:true,connected:this.desktop.connected,transport:'desktop-ipc',serverVersion:'existing desktop IPC',desktopSync:'verified-owner',processPolicy:'attach-only',userId:identity.uuid,admin:identity.elevated,maxConcurrentTurns:MAIN_TURN_LIMIT,attachedThreadId:this.desktop.threadId,capabilities:{steer:!!this.bridge?.available,createThread:false,extensions:!!this.bridge?.available,mcp:!!this.bridge?.available,quota:false,resetQuota:false,setGoal:false,approvals:false,configureTransport:false},reason:this.desktop.connected?undefined:'桌面未连接'};}
   override async listThreads(identity:Identity,projectId:string):Promise<any>{this.requireCurrent(identity,projectId);return {data:[{id:this.desktop.threadId,title:this.desktop.state.title||'桌面当前任务',status:this.lastStatus,updatedAt:this.desktop.state.updatedAt}],nextCursor:null};}
-  override async snapshot(identity:Identity,projectId:string,id:string):Promise<any>{this.requireCurrent(identity,projectId,id);this.update();return {id,title:this.desktop.state.title||'桌面当前任务',status:this.lastStatus,turnId:this.turns().at(-1)?.turnId,items:[...this.items.values()],pending:[],cursor:this.hub.cursor,truncated:true,settings:desktopSettings(this.desktop.state),tokenUsage:desktopUsage(this.desktop.state),metrics:this.usageSnapshot(id)};}
+  override async snapshot(identity:Identity,projectId:string,id:string):Promise<any>{this.requireCurrent(identity,projectId,id);this.update();return {id,title:this.desktop.state.title||'桌面当前任务',status:this.lastStatus,turnId:this.turns().at(-1)?.turnId||this.turns().at(-1)?.id,turns:[...this.turnTimes.values()],items:[...this.items.values()],pending:[],cursor:this.hub.cursor,truncated:true,settings:desktopSettings(this.desktop.state),tokenUsage:desktopUsage(this.desktop.state),metrics:this.usageSnapshot(id)};}
   override async models(identity:Identity):Promise<any>{
     if(!identity.uuid)throw new ConsoleError(401,'LOGIN_REQUIRED','请登录。');
     return {...await this.catalog.read(desktopSettings(this.desktop.state).model),settings:desktopSettings(this.desktop.state)};

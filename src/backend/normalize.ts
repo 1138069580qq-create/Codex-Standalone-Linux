@@ -1,18 +1,19 @@
-import path from "node:path";
 import {textPrefix} from "./text";
+import {fileReference,generatedImageReference,markdownLinks} from "./artifacts";
 
 export interface TimelineItem {
   id: string;
   type: string;
   role?: "user" | "assistant";
+  phase?: "commentary" | "final_answer";
   text: string;
   status?: string;
   turnId?: string;
   startedAt?: number;
   finishedAt?: number;
   durationMs?: number;
-  images?: Array<{ path?: string; src?: string; alt?: string }>;
-  files?: Array<{ path: string; kind?: string }>;
+  images?: Array<{ path?: string; src?: string; generated?: string; alt?: string; source?: string }>;
+  files?: Array<{ path: string; kind?: string; source?: string; label?: string }>;
   truncated?: boolean;
 }
 export const MAX_ITEM_CHARS = 64 * 1024;
@@ -40,18 +41,8 @@ export function imageReference(value: unknown, root?: string): { path?: string; 
     try { const url = new URL(value); if (!url.username && !url.password) return { src: url.href }; } catch {}
     return;
   }
-  let relative = value;
-  if (path.isAbsolute(value) || path.win32.isAbsolute(value)) {
-    if (!root) return;
-    const paths = /^[a-z]:/i.test(root) || root.startsWith("\\\\") ? path.win32 : path.posix;
-    relative = paths.relative(root, value);
-    if (paths.isAbsolute(relative)) return;
-  }
-  relative = relative.replace(/\\/g, "/");
-  const parts = relative.split("/");
-  if (parts.some(p => p === ".." || p.includes(":") || /^(?:\.git|\.ssh|\.codex|auth\.json)$/i.test(p) || /^\.env/i.test(p))) return;
-  relative = parts.filter(p => p && p !== ".").join("/");
-  if (relative && /\.(?:png|jpe?g|webp|gif|avif|tiff?)$/i.test(relative)) return { path: relative };
+  const relative=fileReference(value,root);
+  if(relative&&/\.(?:png|jpe?g|webp|gif|avif|tiff?)$/i.test(relative))return {path:relative};
 }
 export function normalizeItem(item: any, root?: string, turnId?: string): TimelineItem {
   const type = String(item?.type || "other");
@@ -83,19 +74,26 @@ export function normalizeItem(item: any, root?: string, turnId?: string): Timeli
       : "";
   else if (type === "plan") text = String(item.text || "");
   else text = typeof item?.text === "string" ? item.text : type;
-  const images: Array<{ path?: string; src?: string; alt?: string }> = [];
-  const addImage = (value: unknown, alt?: string) => {
-    const image = imageReference(value, root);
-    if (image && images.length < 8 && !images.some(i => i.path === image.path && i.src === image.src))
-      images.push({ ...image, ...(alt ? { alt: alt.slice(0, 160) } : {}) });
+  const images: NonNullable<TimelineItem['images']> = [],files: NonNullable<TimelineItem['files']> = [];
+  const generation=['imageGeneration','imageGenerationCall'].includes(type);
+  const addImage = (value: unknown, alt?: string, source?: string) => {
+    const local=imageReference(value,root),generated=generation?generatedImageReference(value):undefined;
+    const image=local??(generated?{generated}:undefined);
+    if(image&&images.length<8&&!images.some(i=>JSON.stringify([i.path,i.src,i.generated])===JSON.stringify([(image as any).path,(image as any).src,(image as any).generated])))
+      images.push({...image,...(alt?{alt:alt.slice(0,160)}:{}),...(source?{source}:{})});
   };
-  if (type === "imageGeneration" || type === "imageGenerationCall" || type === "imageView") {
-    for (const key of ["path", "outputPath", "imagePath", "url"]) addImage(item[key]);
+  if(generation||type==='imageView'){
+    for(const key of ['savedPath','saved_path','path','outputPath','imagePath','url'])addImage(item[key]);
+    // Some protocol versions return a path in result. Never forward base64 image data.
+    if(typeof item.result==='string'&&item.result.length<4096)addImage(item.result);
   }
-  for (const c of Array.isArray(item.content) ? item.content.slice(0, 30) : [])
-    if (["image", "localImage", "image_url", "output_image"].includes(c?.type)) addImage(c.path ?? c.url ?? c.image_url?.url);
-  // Never relay base64 image payloads or private reasoning as preview data.
-  if (type === "agentMessage") for (const m of text.slice(0, MAX_ITEM_CHARS).matchAll(/!\[([^\]]*)\]\((?:<([^>]+)>|([^\s)]+))(?:\s+"[^"]*")?\)/g)) addImage(m[2] || m[3], m[1]);
+  for(const c of Array.isArray(item.content)?item.content.slice(0,30):[])
+    if(['image','localImage','image_url','output_image','inputImage'].includes(c?.type))addImage(c.path??c.url??c.imageUrl??c.image_url?.url);
+  if(type==='agentMessage')for(const link of markdownLinks(text)){
+    if(link.image)addImage(link.source,link.label,link.source);
+    else {const file=fileReference(link.source,root);if(file&&!files.some(f=>f.path===file))files.push({path:file,source:link.source,label:link.label.slice(0,160)});}
+  }
+  if(type==='fileChange')for(const change of Array.isArray(item.changes)?item.changes.slice(0,100):[]){const file=fileReference(change.path,root);if(file)files.push({path:file,kind:typeof change.kind==='string'?change.kind:change.kind?.type});}
   const epoch=(v:unknown)=>typeof v==="number"&&Number.isFinite(v)&&v>=0?(v<1e12?v*1000:v):undefined;
   const startedAt=epoch(item.startedAt),finishedAt=epoch(item.completedAt??item.finishedAt);
   const truncated = !!item.truncated || text.length > MAX_ITEM_CHARS;
@@ -103,6 +101,7 @@ export function normalizeItem(item: any, root?: string, turnId?: string): Timeli
     id: String(item.id),
     type,
     ...(turnId ? { turnId } : {}),
+    ...(type==='agentMessage'&&['commentary','final_answer'].includes(item.phase)?{phase:item.phase}:{}),
     ...(startedAt!==undefined?{startedAt}:{}),...(finishedAt!==undefined?{finishedAt}:{}),
     ...(images.length ? { images } : {}),
     ...(typeof item.durationMs === "number" && Number.isFinite(item.durationMs) && item.durationMs >= 0 ? { durationMs: item.durationMs } : {}),
@@ -113,14 +112,7 @@ export function normalizeItem(item: any, root?: string, turnId?: string): Timeli
         : {}),
     text: textPrefix(text, MAX_ITEM_CHARS),
     ...(typeof item.status === "string" ? { status: item.status } : {}),
-    ...(type === "fileChange"
-      ? {
-          files: (item.changes || []).map((c: any) => ({
-            path: String(c.path),
-            kind: typeof c.kind === "string" ? c.kind : c.kind?.type
-          }))
-        }
-      : {}),
+    ...(files.length?{files}:{}),
     ...(truncated ? { truncated: true } : {})
   };
 }

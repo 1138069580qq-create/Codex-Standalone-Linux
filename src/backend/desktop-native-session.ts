@@ -26,7 +26,7 @@ export class DesktopNativeSession extends DesktopIpc {
       case 'thread/name/updated':state.title=p.threadName;break;
       case 'thread/tokenUsage/updated':state.latestTokenUsageInfo=p.tokenUsage;break;
       case 'thread/goal/updated':state.threadGoal=p.goal;break;
-      case 'turn/started':case 'turn/completed':Object.assign(turn(p.turn.id),p.turn);state.threadRuntimeStatus={type:event.method==='turn/started'?'active':'idle'};break;
+      case 'turn/started':case 'turn/completed':Object.assign(turn(p.turn.id),p.turn,event.method==='turn/started'?{startedAt:p.turn.startedAt??Date.now()/1000}:{completedAt:p.turn.completedAt??Date.now()/1000});state.threadRuntimeStatus={type:event.method==='turn/started'?'active':'idle'};break;
       case 'item/started':case 'item/completed':{const t=turn(p.turnId||turns.at(-1)?.id||'live'),index=t.items.findIndex((i:any)=>i.id===p.item.id);if(index<0)t.items.push(p.item);else t.items[index]=p.item;break;}
       case 'item/agentMessage/delta':case 'item/commandExecution/outputDelta':case 'item/plan/delta':{const t=turn(p.turnId||turns.at(-1)?.id||'live');let item=t.items.find((i:any)=>i.id===p.itemId);if(!item){item={id:p.itemId,type:event.method.includes('agentMessage')?'agentMessage':event.method.includes('plan')?'plan':'commandExecution',text:''};t.items.push(item);}const field=item.type==='commandExecution'?'aggregatedOutput':'text';if(!item.truncated){const text=(item[field]||'').concat(p.delta);item[field]=textPrefix(text,65536);item.truncated=text.length>65536;}break;}
       case 'error':turn(turns.at(-1)?.id||'live').items.push({id:'error-'+Date.now(),type:'other',text:p.error?.message,status:'failed'});break;

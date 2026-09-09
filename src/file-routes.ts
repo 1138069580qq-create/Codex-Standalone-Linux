@@ -5,9 +5,10 @@ import {openProjectDownload} from "./backend/files";
 import {projectPreview,ThumbnailCache} from "./backend/previews";
 import {UploadSessions} from "./backend/transfers";
 import {downloadExternal} from "./backend/remote-files";
+import {generatedImagesRoot} from "./backend/artifacts";
 import {contentType,isMediaType} from "./backend/mime";
 type Handler=(c:Koa.ParameterizedContext,who:Identity)=>Promise<unknown>|unknown;
-type Access={root:(who:Identity,id:string,capability:"files")=>Promise<string>;wrap:(handler:Handler)=>Koa.Middleware;project:(who:Identity,id:string)=>Project};
+type Access={root:(who:Identity,id:string,capability:"files")=>Promise<string>;wrap:(handler:Handler)=>Koa.Middleware;project:(who:Identity,id:string)=>Project;snapshot:(who:Identity,id:string,threadId:string)=>Promise<any>};
 export function installFileRoutes(router:Router, access:Access) {
   const uploads=new UploadSessions(),images=new ThumbnailCache();let previews=0,downloads=0;
   const query=(c:Koa.Context,key:string)=>{const v=c.query[key];if(typeof v!=="string"||!v||v.length>4096)throw new ConsoleError(400,"INVALID_PARAMETER","Invalid "+key);return v;};
@@ -36,6 +37,17 @@ export function installFileRoutes(router:Router, access:Access) {
     const file=await images.read(await access.root(who,query(c,"projectId"),"files"),query(c,"path"),c.query.full==="1");
     c.set("Cache-Control","private, no-cache");c.set("ETag",file.etag);
     if(c.get("if-none-match").split(",").map(v=>v.trim()).includes(file.etag)){c.status=304;return;}
+    c.type=file.type;c.body=file.data;
+  }));
+  router.get('/files/generated-image',access.wrap(async(c,who)=>{
+    const projectId=query(c,'projectId');await access.root(who,projectId,'files');
+    const snapshot=await access.snapshot(who,projectId,query(c,'threadId'));
+    const index=Number(query(c,'index')),item=snapshot.items.find((i:any)=>i.id===query(c,'itemId'));
+    const name=Number.isInteger(index)&&index>=0&&index<8?item?.images?.[index]?.generated:undefined;
+    if(!name)throw new ConsoleError(404,'IMAGE_NOT_FOUND','此对话中没有该图片。');
+    const file=await images.read(generatedImagesRoot(),name,c.query.full==='1');
+    c.set('Cache-Control','private, no-cache');c.set('ETag',file.etag);
+    if(c.get('if-none-match').split(',').map(v=>v.trim()).includes(file.etag)){c.status=304;return;}
     c.type=file.type;c.body=file.data;
   }));
   router.post("/uploads",access.wrap(async(c,who)=>{const b=body(c);return uploads.begin(who.uuid,await access.root(who,b.projectId,"files"),b.name,b.size,b.hash);}));

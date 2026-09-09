@@ -1,50 +1,97 @@
 /* Incremental features for the standalone UI. No framework/build step or GitHub integration. */
 'use strict';
 (() => {
-  const groups=new Map();let fileSequence=0,registrationSequence=0,imageSequence=0;
-  const endpoint=(route,projectId,extra={})=>`/api/codex/${route}?${q({projectId,...extra})}`;
+  const groups=new Map();let fileSequence=0,registrationSequence=0,imageSequence=0,timingTimer=null;
+  const endpoint=(route,projectId,extra={})=>'/api/codex/'+route+'?'+q({projectId,...extra});
   const same=(epoch,projectId)=>epoch===S.epoch&&projectId===S.project?.id&&!!S.user;
-  function reset(){fileSequence++;registrationSequence++;imageSequence++;groups.clear();$('preview-body').replaceChildren();$('file-list').replaceChildren();$('file-preview').hidden=true;$('file-dialog').close();$('image-dialog').close();$('full-image').removeAttribute('src');$('browser-surface').replaceChildren();$('browser-external').hidden=true;$('transfer-status').textContent='';}
-  const duration=n=>n<1000?`${Math.round(n)} 毫秒`:n<60000?`${(n/1000).toFixed(1)} 秒`:`${Math.floor(n/60000)} 分 ${Math.floor(n%60000/1000)} 秒`;
-  function fileUrl(path,full=false,projectId=S.project?.id){return endpoint('files/image',projectId,{path,...(full?{full:'1'}:{})});}
+  function reset(){fileSequence++;registrationSequence++;imageSequence++;groups.clear();clearInterval(timingTimer);timingTimer=null;$('preview-body').replaceChildren();$('file-list').replaceChildren();$('file-preview').hidden=true;$('file-dialog').close();$('image-dialog').close();$('full-image').removeAttribute('src');$('browser-surface').replaceChildren();$('browser-external').hidden=true;$('transfer-status').textContent='';}
+  function fileUrl(value,full=false,projectId=S.project?.id){
+    const image=typeof value==='string'?{path:value}:value;
+    return image.generated?endpoint('files/generated-image',projectId,{threadId:S.thread?.id,itemId:image.itemId,index:String(image.imageIndex||0),...(full?{full:'1'}:{})}):endpoint('files/image',projectId,{path:image.path,...(full?{full:'1'}:{})});
+  }
   function thumbnail(image,itemId){
-    if(image.path&&permission('files')){
-      const button=el('button',undefined,'thumbnail-button');button.type='button';button.setAttribute('aria-label',`查看全图 ${image.alt||image.path}`);
-      const img=el('img');img.src=fileUrl(image.path);img.alt=image.alt||image.path;img.loading='lazy';img.decoding='async';img.width=160;img.height=120;img.dataset.preview='thumbnail';
-      img.onerror=()=>{img.removeAttribute('src');button.classList.add('image-unavailable');button.title='缩略图暂不可用，点击重试全图';};button.append(img);button.onclick=()=>openImage(image.path,image.alt||image.path);return button;
+    if((image.path||image.generated)&&permission('files')){
+      const ref={...image,itemId:image.itemId||itemId},title=image.alt||(image.path||image.generated).split('/').pop();
+      const button=el('button',undefined,'thumbnail-button');button.type='button';button.setAttribute('aria-label','查看全图 '+title);
+      const img=el('img');img.src=fileUrl(ref);img.alt=title;img.loading='lazy';img.decoding='async';img.width=160;img.height=120;img.dataset.preview='thumbnail';
+      img.onerror=()=>{img.removeAttribute('src');button.classList.add('image-unavailable');button.title='缩略图暂不可用，点击重试全图';};button.append(img);button.onclick=()=>openImage(ref,title);return button;
     }
-    // Never auto-fetch an arbitrary remote image from model output.
+    // Never auto-fetch arbitrary remote URLs from model output.
     if(image.src){try{const url=new URL(image.src);if(url.protocol==='https:'&&!url.username&&!url.password){const link=el('a','外部图片（点击打开）');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';return link;}}catch{}}
-    return null;
+    return el('span','图片需要文件访问权限','unavailable-attachment');
+  }
+  function fileLink(target,label,item){
+    const file=(item.files||[]).find(f=>f.source===target||f.path===target);
+    if(file){
+      if(!permission('files'))return el('span',label+'（无文件权限）','unavailable-attachment');
+      const button=el('button',label||file.path.split('/').pop(),'inline-file');button.type='button';button.title='预览 '+file.path;button.onclick=action(()=>previewFile(file.path));return button;
+    }
+    try{const url=new URL(target);if(['http:','https:','mailto:'].includes(url.protocol)&&!url.username&&!url.password){const a=el('a',label||target);a.href=url.href;a.target='_blank';a.rel='noopener noreferrer';return a;}}catch{}
+    const span=el('span',label||target,'unavailable-attachment');span.title='此链接不在当前项目的可预览范围内';return span;
+  }
+  function markdown(item){return CodexMarkdown.render(item.text+(item.truncated?'\n[内容已截断]':''),{
+    link:(target,label)=>fileLink(target,label,item),
+    image:(target,label)=>{if((item.images||[]).some(i=>i.source===target||i.path===target||i.src===target))return el('span');return el('span','[图片：'+(label||'无法预览')+']','unavailable-attachment');}
+  });}
+  function itemNode(item){
+    const tool=!['userMessage','agentMessage','plan'].includes(item.type);let node=S.nodes.get(item.id);
+    if(!node){
+      const root=el('article',undefined,'message '+item.type),body=el('div'),media=el('div',undefined,'message-images');let summary;
+      if(tool){const details=el('details',undefined,'process-tool');summary=el('summary');details.append(summary,body);root.append(details);}
+      else root.append(body);
+      root.append(media);
+      if(item.type==='agentMessage'){const source=el('button','原文','text-source');source.type='button';source.setAttribute('aria-label','查看答复原文');source.onclick=()=>showOriginalText(item.id);root.append(source);}
+      node={root,body,media,summary,key:''};S.nodes.set(item.id,node);
+    }
+    const key=JSON.stringify([item.text,item.truncated,item.status,item.images,item.files]);
+    if(key!==node.key){node.key=key;
+      if(tool){const names={reasoning:'思考摘要',commandExecution:'运行命令',fileChange:'更新文件',imageGeneration:'生成图片',imageGenerationCall:'生成图片',imageView:'查看图片',webSearch:'搜索网页',mcpToolCall:'调用工具'};
+        const title=names[item.type]||labelType(item.type),detail=item.type==='commandExecution'?item.text.split('\n')[0]:item.type==='fileChange'?(item.files||[]).map(f=>f.path.split('/').pop()).join('、'):'';
+        node.summary.replaceChildren(el('span',title,'tool-label'));if(detail)node.summary.append(el('span',detail,'tool-detail'));if(item.status==='failed')node.summary.append(el('span','失败','tool-failed'));
+        node.body.replaceChildren(el('pre',item.text+(item.truncated?'\n[内容已截断]':'')));
+      }else node.body.replaceChildren(item.type==='userMessage'?el('div',item.text,'user-text'):markdown(item));
+      node.media.replaceChildren();if(item.type==='userMessage')for(const [imageIndex,image]of(item.images||[]).entries())node.media.append(thumbnail({...image,imageIndex},item.id));
+    }
+    return node.root;
+  }
+  function updateTiming(){
+    if(document.hidden)return;
+    for(const row of CodexTurns.group(S.items.values(),S)){const node=groups.get(row.id);if(node)node.label.textContent=row.label;}
   }
   function renderTimeline(){
-    const timeline=$('timeline'),follow=timeline.scrollHeight-timeline.scrollTop-timeline.clientHeight<120,usedGroups=new Set();
-    $('empty').hidden=!!S.thread;
-    for(const [id,node] of S.nodes)if(!S.items.has(id)){node.root.remove();S.nodes.delete(id);}
-    let previousGroup=null;
-    for(const item of S.items.values()){
-      const tool=!['userMessage','agentMessage','plan'].includes(item.type);let node=S.nodes.get(item.id);if(node&&!node.media){node.root.remove();S.nodes.delete(item.id);node=null;}
-      if(!node){const root=el('article',undefined,`message ${item.type}`),pre=el('pre'),head=el(tool?'summary':'div',undefined,'message-head'),media=el('div',undefined,'message-images');
-        if(tool){const details=el('details');details.append(head,pre,media);root.append(details);}else{root.append(head,pre,media);if(item.type==='agentMessage'){const raw=el('button','原文','text-source');raw.type='button';raw.onclick=()=>showOriginalText(item.id);head.append(raw);}}
-        node={root,pre,head,media,label:el('span'),imageKey:''};node.head.prepend(node.label);S.nodes.set(item.id,node);
+    const timeline=$('timeline'),scroll=timeline.scrollTop,follow=timeline.scrollHeight-scroll-timeline.clientHeight<120,used=new Set();$('empty').hidden=!!S.thread;
+    for(const [id,node]of S.nodes)if(!S.items.has(id)){node.root.remove();S.nodes.delete(id);}
+    const rows=CodexTurns.group(S.items.values(),S);
+    for(const row of rows){
+      used.add(row.id);let node=groups.get(row.id);
+      if(!node){const root=el('section',undefined,'conversation-turn'),users=el('div',undefined,'turn-users'),details=el('details',undefined,'turn-process'),summary=el('summary'),label=el('span'),process=el('div',undefined,'turn-process-body'),finals=el('div',undefined,'turn-final'),delivery=el('div',undefined,'turn-deliveries');
+        root.dataset.turnId=row.id;summary.append(label);details.append(summary,process);root.append(users,details,finals,delivery);node={root,users,details,summary,label,process,finals,delivery,mode:null,deliveryKey:''};groups.set(row.id,node);
       }
-      const text=item.text+(item.truncated?String.fromCharCode(10)+'[内容已截断]':'');if(node.pre.textContent!==text)node.pre.textContent=text;
-      node.label.textContent=labelType(item.type)+(item.status?` · ${stateName(item.status)}`:'')+(Number.isFinite(item.durationMs)?` · ${duration(item.durationMs)}`:'');
-      const imageKey=JSON.stringify(item.images||[]);if(imageKey!==node.imageKey){node.imageKey=imageKey;node.media.replaceChildren();for(const image of (item.images||[]).slice(0,8)){const view=thumbnail(image,item.id);if(view)node.media.append(view);}}
-      if(tool){const family=(item.turnId||'')+':'+item.type;let group=previousGroup?.family===family?previousGroup:null;
-        if(!group){const key=family+':'+item.id;group=groups.get(key);if(!group){const root=el('details',undefined,'tool-group'),summary=el('summary'),body=el('div');root.append(summary,body);group={key,family,root,summary,body};groups.set(key,group);}group.count=0;group.ms=0;group.timed=0;timeline.append(group.root);usedGroups.add(group.key);}
-        group.count++;if(Number.isFinite(item.durationMs)){group.ms+=item.durationMs;group.timed++;}group.summary.textContent=`${labelType(item.type)} · ${group.count} 次调用${group.timed?' · 累计 '+duration(group.ms):''}`;group.body.append(node.root);previousGroup=group;
-      }else{timeline.append(node.root);previousGroup=null;}
+      const mode=row.collapsible?'complete':row.running?'running':'open';
+      if(mode!==node.mode){node.details.open=mode!=='complete';node.mode=mode;}
+      node.root.classList.toggle('turn-running',row.running);node.root.classList.toggle('turn-failed',['failed','interrupted','cancelled','canceled'].includes(row.status));
+      node.details.classList.toggle('empty-process',!row.process.length);node.summary.setAttribute('aria-label',row.label+'，展开或收起过程');node.label.textContent=row.label;
+      // Move existing nodes without recreating active <details> or reloading media on every delta.
+      const place=(container,items)=>{const roots=items.map(itemNode),keep=new Set(roots);for(const child of [...container.children])if(!keep.has(child))child.remove();for(let i=0;i<roots.length;i++)if(container.children[i]!==roots[i])container.insertBefore(roots[i],container.children[i]||null);};
+      place(node.users,row.users);place(node.process,row.process);place(node.finals,row.finals);
+      const deliveryKey=JSON.stringify([row.images,row.files,permission('files')]);
+      if(deliveryKey!==node.deliveryKey){node.deliveryKey=deliveryKey;node.delivery.replaceChildren();
+        if(row.images.length){const media=el('div',undefined,'message-images delivered-images');for(const image of row.images)media.append(thumbnail(image,image.itemId));node.delivery.append(media);}
+        if(row.files.length){const list=el('div',undefined,'delivered-files');for(const file of row.files){const card=el('div',undefined,'delivery-file'),button=el('button',undefined,'delivery-open');button.type='button';button.disabled=!permission('files');button.title='预览 '+file.path;button.setAttribute('aria-label','预览 '+file.path);button.append(el('span','▤','delivery-icon'),el('span',file.path.split('/').pop(),'delivery-name'),el('span','预览','delivery-hint'));button.onclick=action(()=>previewFile(file.path));card.append(button);
+          if(permission('files')){const download=el('a','↓','delivery-download');download.href=endpoint('files/content',S.project.id,{path:file.path});download.download=file.path.split('/').pop();download.setAttribute('aria-label','下载 '+file.path);card.append(download);}list.append(card);}node.delivery.append(list);}
+      }
+      timeline.append(node.root);
     }
-    for(const [key,g] of groups)if(!usedGroups.has(key)){g.root.remove();groups.delete(key);}
-    if(follow)timeline.scrollTop=timeline.scrollHeight;
+    for(const [id,node]of groups)if(!used.has(id)){node.root.remove();groups.delete(id);}
+    if(rows.some(row=>row.running)){if(!timingTimer)timingTimer=setInterval(updateTiming,1000);}else{clearInterval(timingTimer);timingTimer=null;}
+    if(follow)timeline.scrollTop=timeline.scrollHeight;else timeline.scrollTop=scroll;
   }
   async function openImage(path,title){
     const id=++imageSequence,epoch=S.epoch,projectId=S.project?.id,img=$('full-image');$('image-title').textContent=title;$('image-state').textContent='按需加载全图…';$('image-canvas').classList.remove('actual-size');$('image-zoom').textContent='原始尺寸';
     img.onload=()=>{if(id===imageSequence&&same(epoch,projectId))$('image-state').textContent=`${img.naturalWidth} × ${img.naturalHeight} · 全分辨率安全预览`;};
     img.onerror=()=>{if(id===imageSequence)$('image-state').textContent='全图无法加载或权限已失效；可在文件面板下载原始文件。';};img.src=fileUrl(path,true,projectId);$('image-dialog').showModal();
   }
-  function openInspector(){ $('inspector').classList.add('inspect-open'); }
+  function openInspector(){ S.panel='files';for(const name of ['quota','files','diff','browser'])$('panel-'+name).hidden=name!=='files';for(const button of document.querySelectorAll('[data-panel]')){const active=button.dataset.panel==='files';button.classList.toggle('active',active);button.setAttribute('aria-selected',String(active));}$('inspector').classList.add('inspect-open'); }
   async function previewFile(path){
     const sequence=++fileSequence,epoch=S.epoch,projectId=S.project?.id;const info=await api(endpoint('files/preview',projectId,{path}));if(sequence!==fileSequence||!same(epoch,projectId))return;
     $('file-dialog').close();$('preview-title').textContent=path;$('preview-body').replaceChildren();$('file-preview').hidden=false;openInspector();

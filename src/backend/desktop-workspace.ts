@@ -15,6 +15,7 @@ import { DesktopModelCatalog } from './desktop-settings';
 import { normalizeRateLimits } from './limits';
 import { prepareProjectDirectory,materializeProjectDirectory,normalizeProjectCreation } from './projects';
 import { runtimeStatus } from './normalize';
+import { renameStateFile } from './state-file';
 import type { DesktopTaskTools } from './desktop-tools';
 const validId=(id:any)=>typeof id==='string'&&/^[-a-zA-Z0-9_]{1,128}$/.test(id);
 interface Creation {key:string;userId:string;requestId:string;projectId:string;fingerprint:string;at:number;status:'submitting'|'ready'|'failed'|'unknown';threadId?:string;clientThreadId?:string;messageAccepted?:boolean|null;message?:string}
@@ -41,7 +42,7 @@ export class DesktopWorkspaceService extends CodexConsoleService {
   }
   private newSession(ipc:DesktopIpc,binding?:Project){return this.bridge?new DesktopSessionService(this.config,this.receipts,ipc,new DesktopModelCatalog(),this.bridge,binding):this.makeSession(ipc);}
   private addSession(session:DesktopSessionService){session.useTurnGate(this.turnGate);if(this.usage)session.attachUsage(this.usage);this.attached.set(session.desktop.threadId,session);session.hub.subscribe(event=>{const {cursor,...rest}=event;if(event.type==='connection')this.hub.publish({...rest,payload:{connected:this.status({uuid:'',elevated:false}).connected}});else this.hub.publish(rest);});}
-  private async save(){const write=this.flushing.catch(()=>{}).then(async()=>{await fs.mkdir(path.dirname(this.stateFile),{recursive:true,mode:0o700});const data={version:1,tasks:[...this.known.values()],creations:[...this.creations.values()]};await fs.writeFile(this.stateFile+'.tmp',JSON.stringify(data),{mode:0o600});await fs.rename(this.stateFile+'.tmp',this.stateFile);});this.flushing=write;await write;}
+  private async save(){const write=this.flushing.catch(()=>{}).then(async()=>{await fs.mkdir(path.dirname(this.stateFile),{recursive:true,mode:0o700});const data={version:1,tasks:[...this.known.values()],creations:[...this.creations.values()]};await fs.writeFile(this.stateFile+'.tmp',JSON.stringify(data),{mode:0o600});await renameStateFile(this.stateFile+'.tmp',this.stateFile);});this.flushing=write;await write;}
   async initialize(){
     if(this.initialized)return;this.initialized=true;
     try{const data=JSON.parse(await fs.readFile(this.stateFile,'utf8'));for(const row of data.tasks||[])if(validId(row.id)&&(row.projectId==='projectless'||this.config.value.projects.some(p=>p.id===row.projectId)))this.known.set(row.id,row);for(const row of data.creations||[])if(validId(row.requestId)&&typeof row.userId==='string'){if(row.status==='submitting')row.status='unknown';this.creations.set(row.key,row);}}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
