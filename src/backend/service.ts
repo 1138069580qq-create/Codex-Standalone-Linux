@@ -19,7 +19,7 @@ import {
   threadTitle,
   TimelineItem
 } from "./normalize";
-import { prepareProjectDirectory,materializeProjectDirectory } from './projects';
+import { prepareProjectDirectory,materializeProjectDirectory,normalizeProjectCreation,defaultProjectDirectory } from './projects';
 import { CommandReceipts } from "./receipts";
 import { attachmentPath, projectReference } from "./files";
 import { discoverExistingCodex, type DiscoveredCodexEndpoint } from "./discovery";
@@ -198,8 +198,9 @@ export class CodexConsoleService {
     return requireProject(this.config.value, identity, id, capability);
   }
   async refreshProjects(identity: Identity) { return this.projects(identity); }
+  async projectDirectory(identity: Identity) { requireAdmin(identity); return defaultProjectDirectory(); }
   async createProject(identity:Identity,input:any):Promise<any>{
-    requireAdmin(identity);const prepared=await prepareProjectDirectory(this.config,input),canonical=prepared.root;
+    requireAdmin(identity);input=await normalizeProjectCreation(input);const prepared=await prepareProjectDirectory(this.config,input),canonical=prepared.root;
     const existing=this.config.value.projects.find(p=>p.root===canonical);if(existing)return this.projects(identity).find(p=>p.id===existing.id);
     const p={id:'p-'+createHash('sha256').update(canonical).digest('hex').slice(0,20),name:input.name.trim(),root:canonical,grants:[]};
     return this.receipts.run(identity.uuid+':project:'+input.requestId,async markSubmitted=>{await materializeProjectDirectory(this.config,prepared,p.name);markSubmitted();await this.config.save({...this.config.value,projects:[...this.config.value.projects,p]});return this.projects(identity).find(v=>v.id===p.id);},{trackSubmission:true});

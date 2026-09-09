@@ -622,12 +622,29 @@ $('goal-form').onsubmit=action(async()=>{const objective=$('goal-objective').val
 $('close-references').onclick=()=>$('reference-dialog').close();$('reference-up').onclick=action(async()=>{S.referencePath=S.referencePath.includes('/')?S.referencePath.slice(0,S.referencePath.lastIndexOf('/')):'.';await renderReferences();});$('reference-current').onclick=action(()=>addReference(S.referencePath));
 document.addEventListener('pointerdown',event=>{if(S.menuOpen&&!$('composer-menu').contains(event.target)&&event.target!==$('prompt')&&!$('attach').contains(event.target))closeMenu();});
 // User-initiated project and chat operations. No action runs just by opening its menu.
-let projectAttempt=null,projectCreating=false;
-$('new-project').onclick=()=>{if(projectCreating)return;projectAttempt=null;$('project-error').hidden=true;$('project-error').textContent='';$('project-name').value='';$('project-path').value='';$('project-create-directory').checked=false;$('project-dialog').showModal();$('project-name').focus();};
-$('close-project').onclick=()=>$('project-dialog').close();
+let projectAttempt=null,projectCreating=false,projectDirectory=null,projectDirectoryRequest=0;
+async function openProjectForm(){
+  if(projectCreating)return;
+  const epoch=S.epoch,request=++projectDirectoryRequest;
+  projectAttempt=null;projectDirectory=null;$('project-error').hidden=true;$('project-error').textContent='';$('project-name').value='';
+  $('project-submit').disabled=true;$('project-base-prefix').textContent='读取目录中…';$('project-dialog').showModal();$('project-name').focus();
+  try {
+    const directory=await api('/api/codex/projects/default-directory');
+    if(request!==projectDirectoryRequest||epoch!==S.epoch||!$('project-dialog').open)return;
+    if(typeof directory.root!=='string'||!directory.root||!['/','\\'].includes(directory.separator))throw new Error('服务器未返回可用的默认目录。');
+    projectDirectory=directory;$('project-base-prefix').textContent=directory.root+directory.separator;$('project-base-prefix').title=directory.root;$('project-submit').disabled=false;
+  }catch(error){
+    if(request===projectDirectoryRequest&&epoch===S.epoch&&$('project-dialog').open){$('project-base-prefix').textContent='目录不可用';$('project-error').textContent=error.message;$('project-error').hidden=false;}
+  }
+}
+$('new-project').onclick=action(openProjectForm);
+$('close-project').onclick=()=>{projectDirectoryRequest++;$('project-dialog').close();};
 async function createProjectFromForm(){
   if(projectCreating)return;
-  const epoch=S.epoch,body={name:$('project-name').value.trim(),root:$('project-path').value.trim(),createDirectory:$('project-create-directory').checked,confirmDirectory:true};
+  const folderName=$('project-name').value.trim();
+  if(!projectDirectory){$('project-error').textContent='默认目录尚未就绪，请关闭后重新打开。';$('project-error').hidden=false;return;}
+  if(!folderName||folderName==='.'||folderName==='..'||folderName.includes('/')||folderName.includes('\\')){$('project-error').textContent='只需填写文件夹名称，不要填写完整路径。';$('project-error').hidden=false;return;}
+  const epoch=S.epoch,body={folderName,baseRoot:projectDirectory.root,confirmDirectory:true};
   const fields=Array.from($('project-form').elements),disabled=fields.map(field=>field.disabled);
   projectCreating=true;fields.forEach(field=>field.disabled=true);$('project-submit').textContent='创建中…';$('project-error').hidden=true;$('project-error').textContent='';
   try {

@@ -11,7 +11,7 @@ import { type DesktopBridgeApi } from './desktop-bridge';
 import { readCatalog, publicCatalog, resolveExtensions, readMcp, type Catalog } from './extensions';
 import { DesktopModelCatalog } from './desktop-settings';
 import { normalizeRateLimits } from './limits';
-import { prepareProjectDirectory,materializeProjectDirectory } from './projects';
+import { prepareProjectDirectory,materializeProjectDirectory,normalizeProjectCreation } from './projects';
 import { runtimeStatus } from './normalize';
 import type { DesktopTaskTools } from './desktop-tools';
 const validId=(id:any)=>typeof id==='string'&&/^[-a-zA-Z0-9_]{1,128}$/.test(id);
@@ -89,7 +89,7 @@ export class DesktopWorkspaceService extends CodexConsoleService {
     })();this.projectRefresh=work;try{await work;}finally{this.projectRefresh=undefined;}
   }
   override async createProject(identity:Identity,input:any){
-    requireAdmin(identity);if(!this.bridge?.available||!this.bridge.app)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','桌面已保存项目接口未连接。');
+    requireAdmin(identity);input=await normalizeProjectCreation(input);if(!this.bridge?.available||!this.bridge.app)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','桌面已保存项目接口未连接。');
     const prepared=await prepareProjectDirectory(this.config,input),canonical=prepared.root;
     return this.receipts.run(identity.uuid+':project:'+input.requestId,()=>{const work=this.projectCreationQueue.catch(()=>{}).then(async()=>{
       await materializeProjectDirectory(this.config,prepared,input.name.trim());

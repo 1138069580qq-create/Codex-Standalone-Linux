@@ -1,6 +1,6 @@
 {
   "name": "codex-standalone-linux",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "private": true,
   "description": "Attach-only, low-bandwidth Codex WebUI for Linux. Independent of ElementsPanel.",
   "license": "Apache-2.0",

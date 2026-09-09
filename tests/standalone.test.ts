@@ -55,10 +55,12 @@ test("production HTTP: auth, CSRF, origin, ACL, static compression, ETag, no sec
     return response;
   };
   let response=await call('/api/codex/projects');assert.equal(response.status,401);
+  response=await call('/api/codex/projects/default-directory');assert.equal(response.status,401);
   response=await call('/api/login',{username:'admin',password:'long-test-password'},'POST',{origin:'https://evil.test'});assert.equal(response.status,403);
   response=await call('/api/login',{username:'admin',password:'long-test-password'});assert.equal(response.status,200);
   cookie=response.headers.get('set-cookie')!.split(';')[0];assert.match(response.headers.get('set-cookie')!,/httponly/i);assert.match(response.headers.get('set-cookie')!,/samesite=strict/i);
   const login=await response.json() as any;csrf=login.csrf;assert.ok(csrf);assert.equal(login.user.passwordHash,undefined);
+  response=await call('/api/codex/projects/default-directory');assert.equal(response.status,200);const projectDirectory=await response.json() as any;assert.ok(path.isAbsolute(projectDirectory.root));assert.equal(projectDirectory.separator,path.sep);
   response=await call('/api/codex/admin/connect',{},'POST',{'x-csrf-token':''});assert.equal(response.status,403);
   response=await call('/api/codex/admin/connect',{},'POST',{origin:'https://evil.test'});assert.equal(response.status,403);
   response=await call('/api/admin/users');const users=await response.json();assert.equal(JSON.stringify(users).includes('scrypt'),false);

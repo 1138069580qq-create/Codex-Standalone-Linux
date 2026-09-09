@@ -106,6 +106,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
     "/projects",
     wrap((_c, who) => service.refreshProjects(who))
   );
+  router.get('/projects/default-directory',wrap((_c,who)=>service.projectDirectory(who)));
   router.post('/projects',wrap((c,who)=>{rateLimit(who,'project-create',10);return service.createProject(who,body(c));}));
   router.post('/threads/:id/actions/:action',wrap((c,who)=>{rateLimit(who,'task-action',20);const b=body(c);return service.taskAction(who,b.projectId,c.params.id,c.params.action,b);}));
   router.get(
