@@ -20,7 +20,10 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
   let sampledAt=0;let sampling:Promise<void>|undefined;
   async function sampleQuota(who:Identity){
     if(sampling)return sampling;if(Date.now()-sampledAt<300000)return;
-    sampledAt=Date.now();sampling=(async()=>{try{usage.sample(await service.rateLimits(who));}catch{/* Keep the last sample; never invent quota when the backend is unavailable. */}})();
+    sampledAt=Date.now();sampling=(async()=>{await Promise.all([
+      (async()=>{try{usage.sample(await service.rateLimits(who));}catch{/* Preserve the last valid quota sample. */}})(),
+      (async()=>{usage.syncSubscription(await service.subscription(who));})()
+    ]);})();
     try{await sampling;}finally{sampling=undefined;}
   }
   const streams = new Set<PassThrough>();

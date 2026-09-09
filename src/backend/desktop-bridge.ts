@@ -11,7 +11,7 @@ export interface DesktopBridgeApi {
   watch?(threadId:string,listener:(event:any)=>void):Promise<()=>void>;
   close():void;
 }
-const rpcMethods=new Set(['skills/list','plugin/installed','mcpServerStatus/list','account/rateLimits/read','account/rateLimitResetCredit/consume','project/list','thread/metadata/update','turn/start','turn/interrupt','thread/compact/start','thread/start','thread/resume','thread/read','thread/list','thread/turns/list','thread/goal/get','thread/goal/set','thread/name/set','thread/archive','thread/fork','review/start','feedback/upload']);
+const rpcMethods=new Set(['account/read','skills/list','plugin/installed','mcpServerStatus/list','account/rateLimits/read','account/rateLimitResetCredit/consume','project/list','thread/metadata/update','turn/start','turn/interrupt','thread/compact/start','thread/start','thread/resume','thread/read','thread/list','thread/turns/list','thread/goal/get','thread/goal/set','thread/name/set','thread/archive','thread/fork','review/start','feedback/upload']);
 const hostRoutes=new Set(['get-global-state','projectless-thread-cwd','projectless-workspace-root','set-thread-pinned','list-pinned-threads']);
 /** Opt-in attachment to the existing desktop's local debug endpoint. No browser/Codex process launch.
  * The HTTP service never accepts JavaScript, CDP methods, or arbitrary host routes from a client.
@@ -54,7 +54,7 @@ export class DesktopBridge implements DesktopBridgeApi {
     await this.evaluate('window['+JSON.stringify(this.binding+'_state')+'].ids.add('+JSON.stringify(threadId)+')');
     return ()=>{listeners.delete(listener);if(!listeners.size){this.listeners.delete(threadId);if(this.available)void this.evaluate('window['+JSON.stringify(this.binding+'_state')+']?.ids.delete('+JSON.stringify(threadId)+')').catch(()=>{});}};
   }
-  async rpc(method:string,params:any){if(!rpcMethods.has(method))throw new ConsoleError(400,'DESKTOP_METHOD_DENIED','不允许的桌面操作。');return this.exchange('rpc',method,params);}
+  async rpc(method:string,params:any){if(method==='account/read'){if(params?.refreshToken===true)throw new ConsoleError(400,'ACCOUNT_REFRESH_DENIED','读取套餐信息不会刷新登录令牌。');params={refreshToken:false};}if(!rpcMethods.has(method))throw new ConsoleError(400,'DESKTOP_METHOD_DENIED','不允许的桌面操作。');return this.exchange('rpc',method,params);}
   async host(route:string,params:any){if(route==='get-global-state'&&!['app-server-project-id-by-legacy-project-id-by-host','thread-project-assignments'].includes(params?.key))throw new ConsoleError(400,'DESKTOP_METHOD_DENIED','不允许读取此桌面状态。');if(!hostRoutes.has(route))throw new ConsoleError(400,'DESKTOP_METHOD_DENIED','不允许的桌面操作。');return this.exchange('host',route,params);}
   async app(method:string,params:any){
     if(!this.available)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','桌面功能接口未连接。');

@@ -5,10 +5,9 @@
   const compact=v=>!Number.isFinite(v)?'—':v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(v<10000?1:0)+'K':String(Math.round(v));
   const money=v=>Number.isFinite(v)?'$'+v.toFixed(4):'未定价';
   const duration=v=>!Number.isFinite(v)?'—':v<1000?Math.round(v)+'ms':v<60000?(v/1000).toFixed(1)+'s':Math.floor(v/60000)+'m'+Math.round(v%60000/1000)+'s';
-  const dateInput=v=>{const d=new Date(v);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');};
   const cost=s=>s.unpriced?(s.cost>0?money(s.cost)+' + 未定价':'未定价'):money(s.cost);
   const error=message=>{$('usage-error').hidden=!message;$('usage-error').textContent=message;};
-  function reset(){++U.sequence;++U.detailSequence;clearTimeout(U.timer);U.timer=null;U.summary=null;U.details=null;U.loading=null;U.account=null;U.last=0;U.rows=[];$('quota-content').textContent='尚未读取';$('run-metrics').hidden=true;for(const id of ['usage-dialog','usage-record-dialog'])if($(id).open)$(id).close();for(const id of ['usage-hero','usage-table','usage-chart','usage-estimates','quota-detail-content','usage-record-content'])$(id).replaceChildren();$('usage-prices').value='';}
+  function reset(){++U.sequence;++U.detailSequence;clearTimeout(U.timer);U.timer=null;U.summary=null;U.details=null;U.loading=null;U.account=null;U.last=0;U.rows=[];$('quota-content').textContent='尚未读取';$('run-metrics').hidden=true;for(const id of ['usage-dialog','usage-record-dialog'])if($(id).open)$(id).close();for(const id of ['usage-hero','usage-table','usage-chart','usage-estimates','quota-detail-content','usage-record-content','usage-subscription'])$(id).replaceChildren();$('usage-prices').value='';}
   function schedule(){clearTimeout(U.timer);if(!S.user||document.hidden)return;const delay=Math.max(1000,U.interval*60000-(Date.now()-U.last));U.timer=setTimeout(()=>load().catch(()=>{}),delay);}
   async function load(force=false){
     if(!S.user)return;const account=S.user.id;if(U.account!==account){reset();U.account=account;try{U.interval=localStorage.getItem('codex-usage-refresh')==='30'?30:5;}catch{}$('usage-interval').value=String(U.interval);}
@@ -17,6 +16,8 @@
     const sequence=U.sequence;
     const work=(async()=>{try{const summary=await api('/api/codex/account/usage');if(sequence!==U.sequence||S.user?.id!==account)return;U.summary=summary;U.last=Date.now();renderSummary();if($('usage-dialog').open&&U.tab==='quota')renderEstimates();return summary;}catch(e){if(sequence===U.sequence){U.last=Date.now();if(!U.summary)$('quota-content').textContent='统计暂不可用';else $('quota-content').title='保留上次数据：'+e.message;}throw e;}finally{if(sequence===U.sequence){U.loading=null;schedule();}}})();U.loading=work;return work;
   }
+  function cycleMessage(cycle){return cycle.status==='expired'?'等待账户返回新周期':cycle.reason==='read-failed'?'套餐信息暂不可用':'未获取套餐日期';}
+  function renderSubscription(cycle){const node=$('usage-subscription');node.replaceChildren();node.append(metric('账户套餐',cycle.planType||'未提供'));if(cycle.start&&cycle.end){node.append(metric('周期开始',date(cycle.start)),metric('周期结束',date(cycle.end)));}else node.append(metric('套餐日期',cycleMessage(cycle)));node.append(el('p','自动读取账户信息 · 每周期 5 个周额度','footnote'));}
   function metric(label,value,title){const cell=el('div',undefined,'usage-metric');cell.append(el('span',label,'muted'),el('strong',value));if(title)cell.title=title;return cell;}
   function renderSummary(){
     const s=U.summary;if(!s)return;const node=$('quota-content');node.replaceChildren();node.className='';
@@ -24,7 +25,7 @@
     const p=s.subscriptionPercent,box=metric('订阅周期已用',Number.isFinite(p)?p.toFixed(2)+'%':'待估算','本账户累计周额度百分比 ÷ 5；由同一统计区间的费用占比推算。');
     const bar=el('progress');bar.max=100;bar.value=Number.isFinite(p)?Math.min(100,p):0;bar.setAttribute('aria-label','订阅周期已用百分比');box.append(bar);node.append(box);
     const button=el('button','使用统计 ›','small wide');button.id='open-usage';button.onclick=action(open);node.append(button);
-    node.append(el('p',s.total.unpriced?'有模型未定价':s.cycle.configured?'每周期 5 个周额度':'待设置订阅起止日','footnote'));
+    node.append(el('p',s.total.unpriced?'有模型未定价':s.cycle.configured?'每周期 5 个周额度':cycleMessage(s.cycle),'footnote'));
     node.title='费用与额度更新：'+date(s.generatedAt)+' · '+U.interval+' 分钟刷新';
   }
   function metrics(m){
@@ -68,10 +69,10 @@
     U.tab=tab;for(const button of document.querySelectorAll('[data-usage-tab]')){const active=button.dataset.usageTab===tab;button.classList.toggle('active',active);button.setAttribute('aria-selected',String(active));}
     $('usage-quota').hidden=tab!=='quota';$('usage-settings').hidden=tab!=='settings';$('usage-table').hidden=tab==='quota'||tab==='settings';$('usage-more').hidden=tab!=='requests'||!U.before;
     if(tab==='quota'){renderEstimates();if(U.summary?.limits)renderQuota(U.summary.limits);else $('quota-detail-content').textContent='Codex 尚未返回额度窗口。';return;}
-    if(tab==='settings'){if(!S.user?.admin)return;if(fetchSettings||!$('usage-prices').value){const settings=await api('/api/codex/account/usage/settings');$('usage-prices').value=JSON.stringify(settings.prices,null,2);$('usage-cycle-start').value=dateInput(settings.cycle.start);$('usage-cycle-end').value=settings.cycle.end?dateInput(settings.cycle.end):'';}return;}
+    if(tab==='settings'){if(!S.user?.admin)return;if(fetchSettings||!$('usage-prices').value){const settings=await api('/api/codex/account/usage/settings');$('usage-prices').value=JSON.stringify(settings.prices,null,2);renderSubscription(settings.cycle);}return;}
     renderTable();
   }
-  function renderEstimates(){const node=$('usage-estimates');node.replaceChildren();const s=U.summary;if(!s)return;const grid=el('div',undefined,'usage-grid');grid.append(metric('本周期折算用量',cost(s.cycleUsage)),metric('一周总额度（估算）',Number.isFinite(s.weekUsd)?money(s.weekUsd):'待估算'),metric('周期总额度（5 周）',Number.isFinite(s.cycleUsd)?money(s.cycleUsd):'待估算'),metric('本账户累计周用量',Number.isFinite(s.weeklyPercent)?s.weeklyPercent.toFixed(2)+'%':'待估算'));node.append(grid);node.append(el('p','本账户订阅比例 = 本账户累计周用量 ÷ 5。周美元额度 = 同期已定价费用合计 ÷ 同期已消耗周额度比例。','footnote'));if(!s.pricingComplete)node.append(el('p','存在未定价用量，暂不推算订阅额度。','error'));if(s.quotaGap)node.append(el('p','检测到周窗口或重置卡变化，未观测的区间不补算。','footnote'));if(s.limits)node.append(el('p','额度采样：'+date(s.limits.fetchedAt),'footnote'));}
+  function renderEstimates(){const node=$('usage-estimates');node.replaceChildren();const s=U.summary;if(!s)return;const grid=el('div',undefined,'usage-grid');grid.append(metric('本周期折算用量',cost(s.cycleUsage)),metric('一周总额度（估算）',Number.isFinite(s.weekUsd)?money(s.weekUsd):'待估算'),metric('周期总额度（5 周）',Number.isFinite(s.cycleUsd)?money(s.cycleUsd):'待估算'),metric('本账户累计周用量',Number.isFinite(s.weeklyPercent)?s.weeklyPercent.toFixed(2)+'%':'待估算'));node.append(grid);node.append(el('p','本账户订阅比例 = 本账户累计周用量 ÷ 5。周美元额度 = 同期已定价费用合计 ÷ 同期已消耗周额度比例。','footnote'));if(!s.pricingComplete)node.append(el('p','存在未定价用量，暂不推算订阅额度。','error'));if(s.quotaGap)node.append(el('p','检测到周窗口或重置卡变化，未观测的区间不补算。','footnote'));node.append(el('p',s.cycle.configured?'套餐周期：'+date(s.cycle.start)+' — '+date(s.cycle.end):cycleMessage(s.cycle),'footnote'));if(s.limits)node.append(el('p','额度采样：'+date(s.limits.fetchedAt),'footnote'));}
   function renderTable(){
     const host=$('usage-table');host.replaceChildren();const d=U.details;if(!d)return;
     const table=el('table'),thead=el('thead'),head=el('tr'),request=U.tab==='requests';
@@ -86,7 +87,7 @@
   $('usage-more').onclick=action(()=>loadDetails(true));$('usage-refresh').onclick=action(()=>Promise.all([load(true),loadDetails()]));
   for(const button of document.querySelectorAll('[data-usage-tab]'))button.onclick=action(()=>selectTab(button.dataset.usageTab));
   $('usage-interval').onchange=()=>{U.interval=$('usage-interval').value==='30'?30:5;try{localStorage.setItem('codex-usage-refresh',String(U.interval));}catch{}schedule();renderSummary();};
-  $('usage-settings').onsubmit=action(async()=>{const prices=JSON.parse($('usage-prices').value),start=Date.parse($('usage-cycle-start').value+'T00:00:00'),end=$('usage-cycle-end').value?Date.parse($('usage-cycle-end').value+'T00:00:00'):null;await api('/api/codex/account/usage/settings',{prices,cycle:{start,end}},'PUT');await load(true);toast('已保存；单价适用于后续用量。');});
+  $('usage-settings').onsubmit=action(async()=>{const prices=JSON.parse($('usage-prices').value);await api('/api/codex/account/usage/settings',{prices},'PUT');await load(true);toast('已保存；单价适用于后续用量。');});
   document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(U.timer);U.timer=null;}else if(S.user)load().catch(()=>{});});
   window.CodexUsage={load,reset,metrics,open};
 })();

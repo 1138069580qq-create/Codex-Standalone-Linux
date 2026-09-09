@@ -79,11 +79,12 @@ export class DesktopSessionService extends CodexConsoleService {
     if(status!==this.lastStatus||signature!==this.settingsSignature){this.lastStatus=status;this.settingsSignature=signature;this.hub.publish({type:'status',projectId:project.id,threadId:this.desktop.threadId,payload:{status,turnId:this.turns().at(-1)?.turnId,settings,tokenUsage,metrics:this.usageSnapshot(this.desktop.threadId)}});}
   }
   override get hasActiveWork(){return runtimeStatus({status:this.desktop.state?.threadRuntimeStatus})==='running';}
+  protected override async readAccountMetadata(){if(!this.bridge?.available)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','账户接口未连接。');return this.bridge.rpc('account/read',{refreshToken:false});}
   override async connect(){
     if(!this.desktop.connected)await this.desktop.connect();
     this.update();this.hub.publish({type:'connection',payload:{connected:true}});
   }
-  override disconnect(){if(this.updateTimer)clearTimeout(this.updateTimer);this.updateTimer=undefined;this.catalog.close();this.desktop.close();}
+  override disconnect(){this.invalidateSubscription();if(this.updateTimer)clearTimeout(this.updateTimer);this.updateTimer=undefined;this.catalog.close();this.desktop.close();}
   override status(identity:Identity):any {return {configured:true,connected:this.desktop.connected,transport:'desktop-ipc',serverVersion:'existing desktop IPC',desktopSync:'verified-owner',processPolicy:'attach-only',userId:identity.uuid,admin:identity.elevated,maxConcurrentTurns:1,attachedThreadId:this.desktop.threadId,capabilities:{createThread:false,extensions:!!this.bridge?.available,mcp:!!this.bridge?.available,quota:false,resetQuota:false,setGoal:false,approvals:false,configureTransport:false},reason:this.desktop.connected?undefined:'桌面未连接'};}
   override async listThreads(identity:Identity,projectId:string):Promise<any>{this.requireCurrent(identity,projectId);return {data:[{id:this.desktop.threadId,title:this.desktop.state.title||'桌面当前任务',status:this.lastStatus,updatedAt:this.desktop.state.updatedAt}],nextCursor:null};}
   override async snapshot(identity:Identity,projectId:string,id:string):Promise<any>{this.requireCurrent(identity,projectId,id);this.update();return {id,title:this.desktop.state.title||'桌面当前任务',status:this.lastStatus,turnId:this.turns().at(-1)?.turnId,items:[...this.items.values()],pending:[],cursor:this.hub.cursor,truncated:true,settings:desktopSettings(this.desktop.state),tokenUsage:desktopUsage(this.desktop.state),metrics:this.usageSnapshot(id)};}

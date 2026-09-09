@@ -11,6 +11,7 @@ import {
   requireAdmin,
   permissions
 } from "./config";
+import { normalizeSubscription, unavailableSubscription, type AccountSubscription } from "./subscription";
 import { UsageLedger } from "./usage";
 import { accountDirectoryName } from "./projects";
 import { ReplayHub } from "./events";
@@ -68,6 +69,15 @@ export class CodexConsoleService {
   private reservations = new Set<string>();
   private modelsCache?: { at: number; data: any[] };
   private limitsCache?: CodexRateLimits;
+  protected invalidateSubscription(){this.subscriptionCache=undefined;}
+  private subscriptionCache?:{at:number;value:Promise<AccountSubscription>};
+  protected readAccountMetadata():Promise<any>{return this.rpc().request("account/read",{refreshToken:false});}
+  async subscription(identity:Identity):Promise<AccountSubscription>{
+    if(!identity.uuid)throw new ConsoleError(401,"LOGIN_REQUIRED","请登录。");
+    const now=Date.now();if(this.subscriptionCache&&now-this.subscriptionCache.at<1800000)return this.subscriptionCache.value;
+    const value=(async()=>{try{return normalizeSubscription(await this.readAccountMetadata());}catch{return unavailableSubscription();}})();
+    this.subscriptionCache={at:now,value};return value;
+  }
   private reason = "Codex is not configured or connected.";
   private deltas = new Map<
     string,
@@ -185,6 +195,7 @@ export class CodexConsoleService {
     this.sessions.clear();
     this.opening.clear();
     this.modelsCache = undefined;
+    this.subscriptionCache=undefined;
     this.catalogs.clear();
     this.reason = "Codex is disconnected.";
     this.hub.publish({ type: "connection", payload: { connected: false } });
@@ -815,6 +826,7 @@ export class CodexConsoleService {
       this.hub.publish({ type: "limits", payload: { stale: true } });
       return;
     }
+    if(method==="account/updated"||method==="account/login/completed"){this.subscriptionCache=undefined;this.limitsCache=undefined;this.hub.publish({type:"limits",payload:{stale:true}});return;}
     if (method === "skills/changed") { this.catalogs.clear(); return; }
     const id = p.threadId || p.thread?.id;
     if(id)this.usage?.observe(id,method,p);

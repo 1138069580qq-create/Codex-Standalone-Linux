@@ -44,8 +44,9 @@ export class DesktopWorkspaceService extends CodexConsoleService {
     if(this.bridge)try{await this.bridge.connect();await this.syncDesktopProjects();}catch{/* Capabilities stay unavailable if the opt-in bridge is offline. */}
     if(this.tools)try{this.management=await this.tools.discover();if(this.management)this.savedProjects=(await this.tools.listProjects()).projects||[];}catch{this.management=false;}
   }
+  protected override async readAccountMetadata(){if(!this.bridge?.available)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','账户接口未连接。');return this.bridge.rpc('account/read',{refreshToken:false});}
   override async connect(){await this.initialize();if(this.bridge&&!this.bridge.available)try{await this.bridge.connect();await this.syncDesktopProjects(true);}catch{};for(const session of this.attached.values())await session.connect();}
-  override disconnect(){for(const session of this.attached.values())session.disconnect();this.tools?.close();this.bridge?.close();}
+  override disconnect(){this.invalidateSubscription();for(const session of this.attached.values())session.disconnect();this.tools?.close();this.bridge?.close();}
   override get hasActiveWork(){return [...this.attached.values()].some(s=>s.hasActiveWork);}
   override status(identity:Identity):any{
     const base=this.attached.get(this.anchor.threadId)!.status(identity),native=!!this.bridge?.available;

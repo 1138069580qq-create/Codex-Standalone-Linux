@@ -14,3 +14,9 @@
 - 轮次与时间统计自启用观测后记录；缺失历史不伪造，工具并行区间按墙钟时间去重。
 - Codex 的用量通知不是供应商账单；模型或快速档位未回传时只能使用可知信息，页面保留估算标记。
 - 不导入 CC Switch 数据库；借鉴其缓存/普通输入/输出分项和累计差值方式，避免读取其他应用凭据。参考其 src-tauri/src/proxy/usage/calculator.rs 与 src-tauri/src/services/session_usage_codex.rs。
+
+## v1.4.1 自动套餐元数据
+
+只允许调用已连接后端的 `account/read({refreshToken:false})`。官方现有协议未定义套餐日期；没有数据时不能把手填日期、token 过期时间、周限额重置点或套餐名称当成官方账期。已连接后端如果明确附带 `account.subscription.currentPeriodStart/currentPeriodEnd`（或 snake_case 成对字段），可验证后用于计算。Unix 秒、毫秒、含时区 ISO 日期可识别；不接受缺失起止日、未来开始日、无时区字符串、无效日历日或两个命名版本混用。
+
+周期数据与模型价格分别更新，网页无法通过价格表单篡改周期。自动续期只换统计区间，不删除日志。账户指纹只保留哈希并留在服务器，原始邮箱、账号 ID、完整账户响应不会发送给其他网页用户。原有套餐手填配置迁移为“等待账户读取”。

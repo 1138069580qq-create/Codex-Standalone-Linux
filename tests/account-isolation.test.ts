@@ -9,7 +9,7 @@ import {UserStore} from '../src/auth';
 import {CodexConsoleService} from '../src/backend/service';
 import {permissions,defaultConfig} from '../src/backend/config';
 class Peer extends EventEmitter {
- connected=false;serverInfo={userAgent:'protocol-test'};threads:any[]=[];calls:any[]=[];limits=0;
+ connected=false;serverInfo={userAgent:'protocol-test'};threads:any[]=[];calls:any[]=[];limits=0;accounts=0;
  async connect(){this.connected=true;}close(){this.connected=false;}
  async request(method:string,p:any){this.calls.push({method,p});
   if(method==='thread/start'){const thread={id:'thread-'+(this.threads.length+1),cwd:p.cwd,model:'test-model',modelProvider:'protocol-test',status:'idle'};this.threads.push(thread);return {thread};}
@@ -17,6 +17,7 @@ class Peer extends EventEmitter {
   if(method==='thread/read'||method==='thread/resume')return {thread:this.threads.find(t=>t.id===p.threadId)};
   if(method==='thread/turns/list')return {data:[],nextCursor:null};
   if(method==='account/rateLimits/read'){this.limits++;return {rateLimits:{secondary:{usedPercent:20,windowDurationMins:10080,resetsAt:2000000000}}};}
+  if(method==='account/read'){this.accounts++;assert.equal(p.refreshToken,false);return {account:{type:'chatgpt',planType:'pro',subscription:{currentPeriodStart:Date.now()-86400000,currentPeriodEnd:Date.now()+29*86400000}}};}
   if(method==='model/list')return {data:[{id:'test-model',model:'test-model',displayName:'Test model',supportedReasoningEfforts:[{reasoningEffort:'medium'}],defaultReasoningEffort:'medium'}]};
   throw new Error('Unimplemented protocol mock '+method);
  }
@@ -35,7 +36,7 @@ test('HTTP account isolation: own folders and projectless chats, guessed IDs den
  const [ta,tb]=await Promise.all([call(a,'/api/codex/threads',{projectId:'projectless',requestId:'new-thread-alice'}),call(b,'/api/codex/threads',{projectId:'projectless',requestId:'new-thread-bob'})]);assert.equal(ta.status,200);assert.equal(tb.status,200);
  const la=await call(a,'/api/codex/threads?projectId=projectless');assert.deepEqual(la.data.data.map((v:any)=>v.id),[ta.data.id]);assert.equal((await call(b,'/api/codex/threads/'+ta.data.id+'?projectId=projectless')).status,403);assert.equal((await call(b,'/api/codex/events?projectId=projectless&threadId='+ta.data.id)).status,403);
  runtime.service.usage!.usage(ta.data.id,{inputTokens:1000,cachedInputTokens:500,outputTokens:50});const privateRows=await call(b,'/api/codex/account/usage/details?range=all&userId='+alice.id);assert.equal(privateRows.data.rows.length,0);const own=await call(a,'/api/codex/account/usage/details?range=all');assert.equal(own.data.rows.length,1);assert.equal((await call(b,'/api/codex/account/usage/records/'+own.data.rows[0].id)).status,404);
- await Promise.all([call(a,'/api/codex/account/usage'),call(b,'/api/codex/account/usage'),call(c,'/api/codex/account/usage')]);assert.equal(peer.limits,1);assert.equal((await call(c,'/api/codex/account/usage/settings')).status,403);assert.equal(peer.calls.filter(c=>c.method==='turn/start').length,0);
+ await Promise.all([call(a,'/api/codex/account/usage'),call(b,'/api/codex/account/usage'),call(c,'/api/codex/account/usage')]);assert.equal(peer.limits,1);assert.equal(peer.accounts,1);const auto=await call(a,'/api/codex/account/usage');assert.equal(auto.data.cycle.configured,true);assert.equal(auto.data.cycle.source,'account/read');assert.equal(auto.data.weeksPerCycle,5);assert.equal((await call(c,'/api/codex/account/usage/settings')).status,403);assert.equal(peer.calls.filter(c=>c.method==='turn/start').length,0);
 });
 test('explicit owner overrides an unrelated administrator but preserves a read-only owner grant',()=>{
  const p={id:'p',name:'p',root:'/unused',ownerId:'alice',grants:[{userId:'alice',permissions:['view'] as any}]};assert.equal(permissions(p,{uuid:'bob',elevated:true}).view,false);assert.equal(permissions(p,{uuid:'alice',elevated:false}).view,true);assert.equal(permissions(p,{uuid:'alice',elevated:false}).send,false);

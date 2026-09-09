@@ -4,6 +4,7 @@ import path from 'node:path';
 import { ConsoleError, type Identity, requireAdmin } from './config';
 import type { CodexRateLimits } from './limits';
 import { defaultCodexPrices } from './pricing';
+import type { AccountSubscription } from './subscription';
 
 export interface Price { model:string; input:number; cachedInput:number; output:number; source:string; verifiedAt:string; fastMultiplier?:number; longContext?:{threshold:number;input:number;cachedInput:number;output:number} }
 export interface Tokens { input:number; cached:number; output:number }
@@ -62,7 +63,7 @@ export class UsageLedger {
     );
     if(!(this.db.prepare('PRAGMA table_info(threads)').all() as any[]).some(c=>c.name==='service_tier'))this.db.exec('ALTER TABLE threads ADD COLUMN service_tier TEXT');
     this.startedAt=this.getMeta('startedAt')??this.clock();this.setMeta('startedAt',this.startedAt);
-    if(!this.getMeta('cycle'))this.setMeta('cycle',{start:this.startedAt,end:null,configured:false});
+    if(this.getMeta('cycle')?.source!=='account/read')this.setMeta('cycle',{start:this.startedAt,end:null,configured:false,source:'account/read',status:'unavailable',reason:'not-fetched',planType:null,fetchedAt:null});
     let stored=this.getMeta('prices');if(stored===null){stored=defaultCodexPrices();this.setMeta('prices',stored);}
     for(const p of validatePrices(stored))this.prices.set(p.model,p);
   }
@@ -147,11 +148,17 @@ export class UsageLedger {
     this.db.prepare('INSERT INTO quota(at,bucket,reset_at,used,delta,gap) VALUES (?,?,?,?,?,?)').run(at,bucket,w.resetsAt??null,w.usedPercent,delta,gap);
     this.setMeta('quotaUnavailable',null);this.setMeta('limits',limits);
   }
+  syncSubscription(info:AccountSubscription){
+    if(info.source!=='account/read')return;
+    const previousKey=this.getMeta('subscriptionAccount');
+    if(info.accountKey){if(previousKey&&previousKey!==info.accountKey)this.setMeta('subscriptionAccountSince',this.clock());this.setMeta('subscriptionAccount',info.accountKey);}
+    const prior=this.getMeta('cycle'),cycle={start:info.start??this.startedAt,end:info.end,configured:info.status==='active',source:info.source,status:info.status,reason:info.reason,planType:info.planType,fetchedAt:info.fetchedAt};
+    if(JSON.stringify(prior)!==JSON.stringify(cycle)){this.setMeta('cycle',cycle);this.cache.clear();this.sharedEstimate=undefined;}
+  }
   settings(who:Identity){requireAdmin(who);return {prices:[...this.prices.values()],cycle:this.getMeta('cycle'),startedAt:this.startedAt};}
   configure(who:Identity,input:any){
-    requireAdmin(who);const prices=validatePrices(input.prices),cycle=input.cycle;
-    if(!cycle||!Number.isSafeInteger(cycle.start)||cycle.start<0||cycle.start>this.clock()||(cycle.end!==null&&(!Number.isSafeInteger(cycle.end)||cycle.end<=cycle.start)))throw new ConsoleError(400,'INVALID_CYCLE','订阅开始日不能在未来，结束日须晚于开始日。');
-    this.setMeta('prices',prices);this.setMeta('cycle',{start:cycle.start,end:cycle.end,configured:true});this.prices=new Map(prices.map(p=>[p.model,p]));this.cache.clear();this.sharedEstimate=undefined;
+    requireAdmin(who);if(input.cycle!==undefined)throw new ConsoleError(400,"CYCLE_READ_ONLY","订阅日期自动从账户读取，不能手动修改。");const prices=validatePrices(input.prices);
+    this.setMeta('prices',prices);this.prices=new Map(prices.map(p=>[p.model,p]));this.cache.clear();this.sharedEstimate=undefined;
     // Price changes apply to new events only; immutable historical rates remain auditable.
     return this.settings(who);
   }
@@ -169,9 +176,9 @@ export class UsageLedger {
   }
   overview(who:Identity){
     const now=this.clock(),cached=this.cache.get(who.uuid);if(cached&&now-cached.at<300000)return cached.value;
-    const cycle=this.getMeta('cycle'),end=Math.min(cycle.end===null?now:cycle.end-1,now),self=this.period(who.uuid,cycle.start,end),cycleKey=JSON.stringify(cycle);
+    const storedCycle=this.getMeta('cycle'),cycle={...storedCycle,configured:storedCycle.configured&&storedCycle.end>now,status:storedCycle.status==='active'&&storedCycle.end<=now?'expired':storedCycle.status},start=Math.max(cycle.start,this.getMeta('subscriptionAccountSince')||0),end=Math.min(cycle.end===null?now:cycle.end-1,now),self=this.period(who.uuid,start,end),cycleKey=JSON.stringify(cycle);
     if(!this.sharedEstimate||this.sharedEstimate.cycleKey!==cycleKey||now-this.sharedEstimate.at>=300000){
-      const bounds=this.db.prepare('SELECT MIN(at) first,MAX(at) last FROM quota WHERE at>=? AND at<=?').get(cycle.start,end) as any;
+      const bounds=this.db.prepare('SELECT MIN(at) first,MAX(at) last FROM quota WHERE at>=? AND at<=?').get(start,end) as any;
       const from=bounds.first??end,to=bounds.last??end;
       const quota=this.db.prepare('SELECT COALESCE(SUM(delta),0) consumed,COALESCE(SUM(gap),0) gaps FROM quota WHERE at>? AND at<=?').get(from,to) as any;
       this.sharedEstimate={at:now,cycleKey,all:this.period(null,from,to),quota,from,to};

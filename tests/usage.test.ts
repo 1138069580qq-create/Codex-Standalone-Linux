@@ -4,10 +4,11 @@ import {promises as fs} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {UsageLedger,calculateCost,tokenCounters,validatePrices,type Price} from '../src/backend/usage';
+import {normalizeSubscription} from '../src/backend/subscription';
 import {normalizeRateLimits} from '../src/backend/limits';
 const a={uuid:'alice',elevated:false},b={uuid:'bob',elevated:true},admin={uuid:'administrator',elevated:true};
 const price:Price={model:'mock-priced',input:2,cachedInput:.5,output:8,source:'https://openai.com/api/pricing/',verifiedAt:'2026-09-09'};
-async function fixture(t:any){const dir=await fs.mkdtemp(path.join(os.tmpdir(),'webui-usage-'));let now=Date.UTC(2026,8,9);const file=path.join(dir,'usage.sqlite'),ledger=new UsageLedger(file,()=>now);t.after(()=>ledger.close());ledger.configure(admin,{prices:[price],cycle:{start:now,end:null}});return {ledger,file,at:()=>now,tick:(ms:number)=>now+=ms};}
+async function fixture(t:any){const dir=await fs.mkdtemp(path.join(os.tmpdir(),'webui-usage-'));let now=Date.UTC(2026,8,9);const file=path.join(dir,'usage.sqlite'),ledger=new UsageLedger(file,()=>now);t.after(()=>ledger.close());ledger.configure(admin,{prices:[price]});ledger.syncSubscription(normalizeSubscription({account:{type:'chatgpt',planType:'pro',subscription:{currentPeriodStart:now,currentPeriodEnd:now+30*86400000}}},now));return {ledger,file,at:()=>now,tick:(ms:number)=>now+=ms};}
 const counters=(input:number,cached=0,output=0)=>({inputTokens:input,cachedInputTokens:cached,outputTokens:output,reasoningOutputTokens:999});
 function sample(ledger:UsageLedger,at:number,used:number,reset=2000000000){ledger.sample(normalizeRateLimits({rateLimits:{secondary:{windowDurationMins:10080,usedPercent:used,resetsAt:reset}}},at));}
 test('pricing counts cached input once, includes reasoning in output once, and handles long context',()=>{
