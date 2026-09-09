@@ -42,7 +42,7 @@ export interface ConsoleConfig {
 export const defaultConfig = (): ConsoleConfig => ({
   enabled: false,
   transport: { type: "unix", endpoint: "" },
-  maxConcurrentTurns: 2,
+  maxConcurrentTurns: 5,
   projects: []
 });
 const capabilities: Capability[] = ["view", "send", "approve", "files"];
@@ -161,7 +161,7 @@ export async function validateConfig(value: unknown): Promise<ConsoleConfig> {
       endpoint: tr.endpoint,
       ...(tr.bearerTokenEnv ? { bearerTokenEnv: tr.bearerTokenEnv } : {})
     },
-    maxConcurrentTurns: input.maxConcurrentTurns,
+    maxConcurrentTurns: 5,
     projects
   };
 }

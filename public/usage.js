@@ -1,13 +1,13 @@
 'use strict';
 (() => {
-  const U={account:null,summary:null,details:null,tab:'requests',loading:null,timer:null,last:0,sequence:0,before:null,rows:[],detailSequence:0,interval:5};
+  const U={account:null,summary:null,details:null,tab:'requests',loading:null,timer:null,last:0,sequence:0,before:null,rows:[],detailSequence:0,recordSequence:0,interval:5};
   const number=v=>Number.isFinite(v)?new Intl.NumberFormat('zh-CN',{maximumFractionDigits:0}).format(v):'—';
   const compact=v=>!Number.isFinite(v)?'—':v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(v<10000?1:0)+'K':String(Math.round(v));
   const money=v=>Number.isFinite(v)?'$'+v.toFixed(4):'未定价';
   const duration=v=>!Number.isFinite(v)?'—':v<1000?Math.round(v)+'ms':v<60000?(v/1000).toFixed(1)+'s':Math.floor(v/60000)+'m'+Math.round(v%60000/1000)+'s';
   const cost=s=>s.unpriced?(s.cost>0?money(s.cost)+' + 未定价':'未定价'):money(s.cost);
-  const error=message=>{$('usage-error').hidden=!message;$('usage-error').textContent=message;};
-  function reset(){++U.sequence;++U.detailSequence;clearTimeout(U.timer);U.timer=null;U.summary=null;U.details=null;U.loading=null;U.account=null;U.last=0;U.rows=[];$('quota-content').textContent='尚未读取';$('run-metrics').hidden=true;for(const id of ['usage-dialog','usage-record-dialog'])if($(id).open)$(id).close();for(const id of ['usage-hero','usage-table','usage-chart','usage-estimates','quota-detail-content','usage-record-content','usage-subscription'])$(id).replaceChildren();$('usage-prices').value='';}
+  const error=message=>{if(message){const layer=messageLayer();layerMessage(message,true,layer?.id==='usage-record-dialog'?layer:$('usage-dialog'));}else{for(const id of ['usage-dialog','usage-record-dialog']){const node=$(id).querySelector('[data-layer-message]');if(node){node.hidden=true;node.textContent='';}}}$('usage-error').hidden=true;};
+  function reset(){++U.sequence;++U.detailSequence;++U.recordSequence;clearTimeout(U.timer);U.timer=null;U.summary=null;U.details=null;U.loading=null;U.account=null;U.last=0;U.rows=[];$('quota-content').textContent='尚未读取';$('run-metrics').hidden=true;for(const id of ['usage-dialog','usage-record-dialog'])if($(id).open)$(id).close();for(const id of ['usage-hero','usage-table','usage-chart','usage-estimates','quota-detail-content','usage-record-content','usage-subscription'])$(id).replaceChildren();$('usage-prices').value='';}
   function schedule(){clearTimeout(U.timer);if(!S.user||document.hidden)return;const delay=Math.max(1000,U.interval*60000-(Date.now()-U.last));U.timer=setTimeout(()=>load().catch(()=>{}),delay);}
   async function load(force=false){
     if(!S.user)return;const account=S.user.id;if(U.account!==account){reset();U.account=account;try{U.interval=localStorage.getItem('codex-usage-refresh')==='30'?30:5;}catch{}$('usage-interval').value=String(U.interval);}
@@ -21,6 +21,10 @@
   function metric(label,value,title){const cell=el('div',undefined,'usage-metric');cell.append(el('span',label,'muted'),el('strong',value));if(title)cell.title=title;return cell;}
   function renderSummary(){
     const s=U.summary;if(!s)return;const node=$('quota-content');node.replaceChildren();node.className='';
+    const weeks=(s.limits?.windows||[]).filter(w=>w.windowDurationMins===10080),codex=weeks.filter(w=>!w.bucketId||w.bucketId==='codex');
+    const visible=codex.length?codex:weeks;
+    if(!visible.length)node.append(metric('周额度剩余','未获取周额度'));
+    for(const window of visible){const remaining=Math.max(0,100-window.usedPercent),box=metric('周额度剩余'+(visible.length>1?' · '+(window.bucketId||window.name||'Codex'):''),remaining.toFixed(1)+'%','共享 Codex 账户当前周窗口，不是单个网页账户的额度。');const bar=el('progress');bar.max=100;bar.value=remaining;bar.setAttribute('aria-label','周额度剩余');box.append(bar,el('p',window.resetsAt?shortDate(window.resetsAt)+' 重置':'未提供重置时间','footnote'));node.append(box);}
     node.append(metric('累计折算额度',cost(s.total),'按记录时的 API 单价折算，不是订阅实际账单。'));
     const p=s.subscriptionPercent,box=metric('订阅周期已用',Number.isFinite(p)?p.toFixed(2)+'%':'待估算','本账户累计周额度百分比 ÷ 5；由同一统计区间的费用占比推算。');
     const bar=el('progress');bar.max=100;bar.value=Number.isFinite(p)?Math.min(100,p):0;bar.setAttribute('aria-label','订阅周期已用百分比');box.append(bar);node.append(box);
@@ -81,8 +85,16 @@
     for(const row of rows||[]){const tr=el('tr');if(request){const time=el('td'),button=el('button',date(row.at),'usage-row-button');button.onclick=action(()=>record(row.id));time.append(button);tr.append(time,el('td',row.provider),el('td',row.model),el('td',compact(row.input)+' / '+compact(row.cached)),el('td',compact(row.output)),el('td',money(row.cost)),el('td',duration(row.durationMs)+' / '+duration(row.ttftMs)),el('td',row.status==='observed'?'已观测':stateName(row.status)),el('td','Codex 会话'));}else{const name=row[U.tab==='models'?'model':'provider'],cell=el('td'),button=el('button',name,'usage-row-button');button.onclick=action(async()=>{const select=$('usage-'+(U.tab==='models'?'model':'provider'));if(!Array.from(select.options).some(o=>o.value===name))select.append(new Option(name,name));select.value=name;U.tab='requests';await loadDetails();});cell.append(button);tr.append(cell,el('td',number(row.requests)),el('td',compact(row.input)),el('td',compact(row.cached)),el('td',compact(row.output)),el('td',cost(row)));}body.append(tr);}
     if(!rows?.length){const tr=el('tr'),cell=el('td','暂无记录','muted');cell.colSpan=headers.length;tr.append(cell);body.append(tr);}table.append(body);host.append(table);
   }
-  async function record(id){const account=S.user?.id,row=await api('/api/codex/account/usage/records/'+id);if(account!==S.user?.id)return;const node=$('usage-record-content');node.replaceChildren();for(const [label,value]of [['时间',date(row.at)],['模型',row.model],['供应商',row.provider],['新增输入',number(row.input-row.cached)],['缓存命中',number(row.cached)],['输出',number(row.output)],['折算费用',money(row.cost)],['记录来源','Codex 累计用量差值']])node.append(metric(label,value));if(row.price){node.append(el('h3','本条计价快照'));node.append(el('pre',JSON.stringify(row.price,null,2),'usage-price-snapshot'));}else node.append(el('p','没有这个模型的已核验单价，未计为免费。','footnote'));$('usage-record-dialog').showModal();}
-  $('close-usage').onclick=()=>$('usage-dialog').close();$('close-usage-record').onclick=()=>$('usage-record-dialog').close();
+  async function record(id){
+    const account=S.user?.id,sequence=++U.recordSequence,dialog=$('usage-record-dialog'),node=$('usage-record-content');
+    node.replaceChildren(el('p','正在读取用量记录…','muted'));dialog.showModal();
+    try {
+      const row=await api('/api/codex/account/usage/records/'+id);
+      if(account!==S.user?.id||sequence!==U.recordSequence||!dialog.open)return;
+      node.replaceChildren();for(const [label,value]of [['时间',date(row.at)],['模型',row.model],['供应商',row.provider],['新增输入',number(row.input-row.cached)],['缓存命中',number(row.cached)],['输出',number(row.output)],['折算费用',money(row.cost)],['记录来源','Codex 累计用量差值']])node.append(metric(label,value));if(row.price){node.append(el('h3','本条计价快照'));node.append(el('pre',JSON.stringify(row.price,null,2),'usage-price-snapshot'));}else node.append(el('p','没有这个模型的已核验单价，未计为免费。','footnote'));
+    }catch(error){if(account===S.user?.id&&sequence===U.recordSequence&&dialog.open){node.replaceChildren();layerMessage(error.message,true,dialog);}}
+  }
+  $('close-usage').onclick=()=>$('usage-dialog').close();$('close-usage-record').onclick=()=>{++U.recordSequence;$('usage-record-dialog').close();};
   for(const id of ['usage-range','usage-model','usage-provider'])$(id).onchange=()=>loadDetails();
   $('usage-more').onclick=action(()=>loadDetails(true));$('usage-refresh').onclick=action(()=>Promise.all([load(true),loadDetails()]));
   for(const button of document.querySelectorAll('[data-usage-tab]'))button.onclick=action(()=>selectTab(button.dataset.usageTab));

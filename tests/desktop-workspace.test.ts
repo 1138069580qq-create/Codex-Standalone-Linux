@@ -22,10 +22,10 @@ async function fixture(){
   const service=make();await service.connect();return {service,tools,calls,make,config,project,data};
 }
 const input=(requestId='request-1234')=>({requestId,text:'Build the user request',environment:'local',confirmCurrentDirectory:true,settingsOverrides:[]});
-test('desktop creation requires explicit current-directory confirmation and administrator access before any write',async()=>{
+test('desktop creation requires current-directory confirmation and project authorization before any write',async()=>{
   const {service,calls}=await fixture();try{assert.equal(service.status(admin).capabilities.createWithMessage,true);assert.equal(service.projects(admin)[0].canCreateTask,true);
     await assert.rejects(service.createTask(admin,'demo',{...input(),confirmCurrentDirectory:false}),/确认/);
-    await assert.rejects(service.createTask({uuid:'guest',elevated:false},'demo',input()),/administrator/);
+    await assert.rejects(service.createTask({uuid:'guest',elevated:false},'demo',input()),/access denied/);
     await assert.rejects(service.createTask(admin,'demo',{...input(),settingsOverrides:['access']}),/只能选择模型/);
     assert.equal(calls.length,0);
   }finally{service.disconnect();}

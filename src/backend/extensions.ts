@@ -68,7 +68,7 @@ export function accessPolicy(identity: Identity, root: string, value: unknown, c
   const access=value ?? 'default';
   if (!['default','read-only','full'].includes(access as string)) throw new ConsoleError(400,'INVALID_ACCESS','无效的访问权限。');
   if (access==='full') {
-    if (!identity.elevated) throw new ConsoleError(403,'ADMIN_REQUIRED','完全访问权限仅限管理员。');
+    if (!identity.uuid) throw new ConsoleError(401,'LOGIN_REQUIRED','请登录。');
     if (confirmed !== true) throw new ConsoleError(400,'ACCESS_CONFIRMATION_REQUIRED','请先确认完全访问权限。');
     return {approvalPolicy:'never',sandboxPolicy:{type:'dangerFullAccess'}};
   }

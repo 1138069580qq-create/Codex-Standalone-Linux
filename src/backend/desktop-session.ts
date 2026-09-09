@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { CodexConsoleService } from './service';
+import { MAIN_TURN_LIMIT } from './concurrency';
 import { ConsoleError, requireAdmin, type Project, type ConfigStore, type Identity } from './config';
 import { CommandReceipts } from './receipts';
 import { DesktopIpc } from './desktop-ipc';
@@ -13,6 +14,8 @@ import { DesktopModelCatalog, desktopSettings, desktopUsage, desktopOverrides } 
 export class DesktopSessionService extends CodexConsoleService {
   private items=new Map<string,TimelineItem>();
   private lastStatus='idle';
+  private gateStatus=''; private gateTurn='';
+  protected override async readMainTurnStates(){return [{id:this.desktop.threadId,status:this.desktop.state?.threadRuntimeStatus}];}
   private updateTimer?:NodeJS.Timeout;
   private observedTurn="";private usageItemStates=new Map<string,string>();
   private settingsSignature='';
@@ -75,6 +78,7 @@ export class DesktopSessionService extends CodexConsoleService {
     }
     this.items=next;
     const status=runtimeStatus({status:this.desktop.state.threadRuntimeStatus});
+    if(status!==this.gateStatus||String(turnId||'')!==this.gateTurn){this.gateStatus=status;this.gateTurn=String(turnId||'');this.turnGate.observe(this.desktop.threadId,status,turnId);}
     const settings=desktopSettings(this.desktop.state),tokenUsage=desktopUsage(this.desktop.state),signature=JSON.stringify({settings,tokenUsage});
     if(status!==this.lastStatus||signature!==this.settingsSignature){this.lastStatus=status;this.settingsSignature=signature;this.hub.publish({type:'status',projectId:project.id,threadId:this.desktop.threadId,payload:{status,turnId:this.turns().at(-1)?.turnId,settings,tokenUsage,metrics:this.usageSnapshot(this.desktop.threadId)}});}
   }
@@ -85,7 +89,7 @@ export class DesktopSessionService extends CodexConsoleService {
     this.update();this.hub.publish({type:'connection',payload:{connected:true}});
   }
   override disconnect(){this.invalidateSubscription();if(this.updateTimer)clearTimeout(this.updateTimer);this.updateTimer=undefined;this.catalog.close();this.desktop.close();}
-  override status(identity:Identity):any {return {configured:true,connected:this.desktop.connected,transport:'desktop-ipc',serverVersion:'existing desktop IPC',desktopSync:'verified-owner',processPolicy:'attach-only',userId:identity.uuid,admin:identity.elevated,maxConcurrentTurns:1,attachedThreadId:this.desktop.threadId,capabilities:{createThread:false,extensions:!!this.bridge?.available,mcp:!!this.bridge?.available,quota:false,resetQuota:false,setGoal:false,approvals:false,configureTransport:false},reason:this.desktop.connected?undefined:'桌面未连接'};}
+  override status(identity:Identity):any {return {configured:true,connected:this.desktop.connected,transport:'desktop-ipc',serverVersion:'existing desktop IPC',desktopSync:'verified-owner',processPolicy:'attach-only',userId:identity.uuid,admin:identity.elevated,maxConcurrentTurns:MAIN_TURN_LIMIT,attachedThreadId:this.desktop.threadId,capabilities:{createThread:false,extensions:!!this.bridge?.available,mcp:!!this.bridge?.available,quota:false,resetQuota:false,setGoal:false,approvals:false,configureTransport:false},reason:this.desktop.connected?undefined:'桌面未连接'};}
   override async listThreads(identity:Identity,projectId:string):Promise<any>{this.requireCurrent(identity,projectId);return {data:[{id:this.desktop.threadId,title:this.desktop.state.title||'桌面当前任务',status:this.lastStatus,updatedAt:this.desktop.state.updatedAt}],nextCursor:null};}
   override async snapshot(identity:Identity,projectId:string,id:string):Promise<any>{this.requireCurrent(identity,projectId,id);this.update();return {id,title:this.desktop.state.title||'桌面当前任务',status:this.lastStatus,turnId:this.turns().at(-1)?.turnId,items:[...this.items.values()],pending:[],cursor:this.hub.cursor,truncated:true,settings:desktopSettings(this.desktop.state),tokenUsage:desktopUsage(this.desktop.state),metrics:this.usageSnapshot(id)};}
   override async models(identity:Identity):Promise<any>{
@@ -107,14 +111,21 @@ export class DesktopSessionService extends CodexConsoleService {
       for(const ref of input.references)content[0].text+='\n\nProject reference: '+await projectReference(project.root,ref);
       for(const ref of input.attachments){const full=await attachmentPath(project.root,ref);if(/\.(png|jpe?g|webp)$/i.test(full))content.push({type:'localImage',path:full});else content[0].text+='\n\nAttached project file: '+ref;}
     }
-    return this.receipts.run(`${identity.uuid}:desktop:${id}:${input.requestId}`,async()=>{
+    return this.receipts.run(`${identity.uuid}:desktop:${id}:${input.requestId}`,async markSubmitted=>{
       if(this.hasActiveWork)throw new ConsoleError(409,'THREAD_BUSY','桌面任务仍在运行，请等待本轮结束。');
       const wantsModel=Array.isArray(input.settingsOverrides)&&input.settingsOverrides.some((k:string)=>['model','effort','mode'].includes(k));
       const data=wantsModel?(await this.models(identity)).data:[];
       const overrides=desktopOverrides(this.desktop.state,input,data,identity,project.root);
+      const slot=await this.turnGate.acquire(id);
+      let outcome:'running'|'complete'|'unknown'='unknown';
+      try { slot.submit();markSubmitted();
       const response=await this.desktop.request('thread-follower-start-turn',{conversationId:id,turnStart:{request:{threadId:id,clientUserMessageId:input.requestId,input:content,...overrides},context:{inheritThreadSettings:true}}},2);
-      this.update();return {turnId:response.result?.result?.turn?.id||this.turns().at(-1)?.turnId,status:this.lastStatus};
-    });
+      this.update();const turn=response.result?.result?.turn||response.result?.turn;
+      const turnId=turn?.id||this.turns().at(-1)?.turnId;
+      outcome=turn?.status&&runtimeStatus(turn)!=='running'?'complete':'running';slot.finish(outcome,turnId);
+      return {turnId,status:outcome==='complete'?this.lastStatus:'running'};
+      } finally {slot.finish(outcome);}
+    },{trackSubmission:true});
   }
   override async interrupt(identity:Identity,projectId:string,id:string):Promise<any>{this.requireCurrent(identity,projectId,id,'send');await this.desktop.request('thread-follower-interrupt-turn',{conversationId:id,mode:'user-stop',expectedTurnId:this.turns().at(-1)?.turnId},4);return {ok:true};}
   override async answer():Promise<any>{throw new ConsoleError(501,'DESKTOP_API_UNAVAILABLE','请在桌面中处理审批。');}

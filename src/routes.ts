@@ -237,7 +237,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
     "/admin/config",
     wrap(async (c, who) => {
       requireAdmin(who);
-      if (service.hasActiveWork)
+      if (await service.activeWork())
         throw new ConsoleError(
           409,
           "TASKS_ACTIVE",
@@ -261,9 +261,9 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
   );
   router.post(
     "/admin/disconnect",
-    wrap((_c, who) => {
+    wrap(async (_c, who) => {
       requireAdmin(who);
-      if (service.hasActiveWork)
+      if (await service.activeWork())
         throw new ConsoleError(
           409,
           "TASKS_ACTIVE",

@@ -25,11 +25,11 @@ test('catalog scopes skills to the authorized cwd; installed plugin mentions use
   const down=await readCatalog(async()=>{throw new Error('auth secret');},root);
   assert.equal(down.pluginsAvailable,false);assert.equal(down.skillsAvailable,false);assert.ok(!JSON.stringify(down).includes('auth secret'));
 });
-test('access modes translate to actual sandbox policy and full access cannot bypass admin + confirmation',()=>{
+test('access modes match across accounts; explicit full access still requires confirmation',()=>{
   const user={uuid:'user',elevated:false},admin={uuid:'admin',elevated:true};
   assert.deepEqual(accessPolicy(user,'/project','read-only',false),{approvalPolicy:'never',sandboxPolicy:{type:'readOnly',networkAccess:false}});
   const normal=accessPolicy(user,'/project','default',false);assert.equal(normal.sandboxPolicy.networkAccess,false);
-  assert.throws(()=>accessPolicy(user,'/project','full',true));assert.throws(()=>accessPolicy(admin,'/project','full',false));
+  assert.deepEqual(accessPolicy(user,'/project','full',true),accessPolicy(admin,'/project','full',true));assert.throws(()=>accessPolicy(user,'/project','full',false));assert.throws(()=>accessPolicy(admin,'/project','full',false));assert.throws(()=>accessPolicy({uuid:'',elevated:false},'/project','full',true));
   assert.deepEqual(accessPolicy(admin,'/project','full',true),{approvalPolicy:'never',sandboxPolicy:{type:'dangerFullAccess'}});
   assert.throws(()=>accessPolicy(admin,'/project','danger-arbitrary',true));
 });

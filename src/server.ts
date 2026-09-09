@@ -72,14 +72,15 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
     if (!["GET", "HEAD"].includes(ctx.method)) {
       if (ctx.get("origin") && ctx.get("origin") !== options.origin) throw new ConsoleError(403, "ORIGIN_DENIED", "Cross-origin request denied.");
       if (ctx.get("sec-fetch-site") === "cross-site") throw new ConsoleError(403, "ORIGIN_DENIED", "Cross-site request denied.");
-      if (ctx.path !== "/api/login") {
+      if (!["/api/login", "/api/register"].includes(ctx.path)) {
         const active = current(ctx);
         if (!active) throw new ConsoleError(401, "LOGIN_REQUIRED", "Sign in first.");
         if (ctx.get("x-csrf-token") !== active.session.csrf) throw new ConsoleError(403, "CSRF_DENIED", "Session token missing. Reload and sign in again.");
       }
     }
-    if (ctx.path !== "/api/login" && ctx.path !== "/api/session" && !current(ctx)) throw new ConsoleError(401, "LOGIN_REQUIRED", "Sign in first.");
-    if (ctx.path === "/api/login" && ctx.method === "POST") {
+    if (!["/api/login", "/api/register", "/api/session"].includes(ctx.path) && !current(ctx)) throw new ConsoleError(401, "LOGIN_REQUIRED", "Sign in first.");
+    if (["/api/login", "/api/register"].includes(ctx.path) && ctx.method === "POST") {
+      if (ctx.path === "/api/register") limiter.take(`register:${ctx.ip}`, 5, 15 * 60_000);
       limiter.take(`login:${ctx.ip}`, 12, 15 * 60_000);
       if (Number(ctx.get("content-length")) > 4096) throw new ConsoleError(413, "BODY_TOO_LARGE", "Login request too large.");
     }
@@ -92,7 +93,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
     if (!ctx.is("application/json")) throw new ConsoleError(415, "JSON_REQUIRED", "Send application/json.");
     if (parsing >= 4) throw new ConsoleError(429, "BODY_BUSY", "Too many uploads; try again later.");
     parsing++;
-    try { await (ctx.path === "/api/login" ? parseLogin : parse)(ctx, async () => {}); } finally { parsing--; }
+    try { await (["/api/login", "/api/register"].includes(ctx.path) ? parseLogin : parse)(ctx, async () => {}); } finally { parsing--; }
     await next();
   });
   const auth = new Router();
@@ -114,6 +115,22 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
     sessions.revoke(token(ctx));
     const created = sessions.create(user); setCookie(ctx, created.token, 12 * 3600_000);
     ctx.body = { user: publicUser(user), csrf: created.csrf };
+  });
+  auth.post("/api/register", async ctx => {
+    if (authInFlight >= 4) throw new ConsoleError(429, "AUTH_BUSY", "请求较多，请稍后再试。");
+    const body = ctx.request.body as any;
+    if (!body || Array.isArray(body) || typeof body.username !== "string" || typeof body.password !== "string" ||
+        Object.keys(body).some(key => !["username", "password"].includes(key)))
+      throw new ConsoleError(400, "INVALID_REGISTRATION", "注册只需用户名和密码，不能设置账户权限。");
+    authInFlight++;
+    try {
+      // Never spread public input into the administrative upsert API.
+      const createdUser = await users.upsert({ username: body.username, password: body.password, admin: false });
+      const user = users.users.find(u => u.id === createdUser.id)!;
+      sessions.revoke(token(ctx));
+      const created = sessions.create(user); setCookie(ctx, created.token, 12 * 3600_000);
+      ctx.status = 201; ctx.body = { user: publicUser(user), csrf: created.csrf };
+    } finally { authInFlight--; }
   });
   auth.post("/api/logout", ctx => { sessions.revoke(token(ctx)); setCookie(ctx, "", 0); routes.closeStreams(); ctx.body = { ok: true }; });
   auth.get("/api/admin/users", ctx => { requireAdmin(current(ctx)!.identity); ctx.body = users.users.map(publicUser); });

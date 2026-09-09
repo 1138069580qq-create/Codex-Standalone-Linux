@@ -15,6 +15,7 @@ import { normalizeSubscription, unavailableSubscription, type AccountSubscriptio
 import { UsageLedger } from "./usage";
 import { accountDirectoryName } from "./projects";
 import { ReplayHub } from "./events";
+import { MainTurnGate, MAIN_TURN_LIMIT, readMainThreads } from "./concurrency";
 import {
   MAX_ITEM_CHARS,
   normalizeItem,
@@ -56,6 +57,14 @@ interface Pending {
 }
 export class CodexConsoleService {
   readonly hub = new ReplayHub();
+  protected turnGate = new MainTurnGate(() => this.readMainTurnStates());
+  useTurnGate(gate: MainTurnGate) { this.turnGate = gate; }
+  protected readMainTurnStates(): Promise<any[]> { return readMainThreads(params => this.rpc().request('thread/list', params)); }
+  protected async mainAction(id: string, dispatch: () => Promise<any>, markSubmitted: () => void) {
+    const slot = await this.turnGate.acquire(id); let outcome: 'running' | 'unknown' = 'unknown';
+    try { slot.submit(); markSubmitted(); const result = await dispatch(); outcome = 'running'; slot.finish(outcome); return result; }
+    finally { slot.finish(outcome); }
+  }
   usage?: UsageLedger;
   attachUsage(usage:UsageLedger){this.usage=usage;}
   usageSnapshot(id:string){const owner=this.usage?.owner(id);return owner?this.usage!.metrics({uuid:owner,elevated:false},id):undefined;}
@@ -101,7 +110,7 @@ export class CodexConsoleService {
       admin: identity.elevated,
       reason: this.peer?.connected ? undefined : this.reason,
       capabilities:{projects:!!identity.uuid,projectless:!!identity.uuid,taskActions:true},
-      maxConcurrentTurns: this.config.value.maxConcurrentTurns
+      maxConcurrentTurns: MAIN_TURN_LIMIT
     };
   }
   async discover(identity: Identity): Promise<DiscoveredCodexEndpoint[]> {
@@ -113,9 +122,13 @@ export class CodexConsoleService {
       );
     return discoverExistingCodex();
   }
+  async activeWork(): Promise<boolean> {
+    if(this.status({uuid:'',elevated:false}).connected) await this.turnGate.synchronize();
+    return this.hasActiveWork;
+  }
   get hasActiveWork(): boolean {
     return (
-      this.reservations.size > 0 ||
+      this.turnGate.count > 0 || this.reservations.size > 0 ||
       this.pending.size > 0 ||
       [...this.sessions.values()].some((s) => s.status === "running")
     );
@@ -226,24 +239,24 @@ export class CodexConsoleService {
   async taskAction(identity:Identity,projectId:string,id:string,action:string,input:any):Promise<any>{
     const project=this.project(identity,projectId,'send');const thread=await this.verifyThread(project,id);
     if(!['rename','pin','archive','fork','side','compact','review','feedback'].includes(action)||!/^[-a-zA-Z0-9_]{8,100}$/.test(input.requestId||''))throw new ConsoleError(400,'INVALID_ACTION','无效的操作或请求 ID。');
-    if(['pin','archive','fork','side','feedback'].includes(action))requireAdmin(identity);
+
     if(!['rename','pin'].includes(action)&&input.confirmed!==true)throw new ConsoleError(400,'CONFIRMATION_REQUIRED','请确认操作。');
     if(['archive','fork','side','compact','review'].includes(action)&&runtimeStatus(thread)==='running')throw new ConsoleError(409,'THREAD_BUSY','请等待当前消息结束。');
     if(action==='rename'&&(typeof input.name!=='string'||!input.name.trim()||input.name.length>120))throw new ConsoleError(400,'INVALID_TITLE','标题为 1–120 字。');
     if(action==='pin'&&typeof input.pinned!=='boolean')throw new ConsoleError(400,'INVALID_PIN','无效的置顶状态。');
     if(action==='review'&&input.target!=='uncommittedChanges'&&!(input.target==='baseBranch'&&typeof input.branch==='string'&&input.branch.trim()&&input.branch.length<=200))throw new ConsoleError(400,'INVALID_REVIEW','请选择审查范围。');
     if(action==='feedback'&&(typeof input.reason!=='string'||!input.reason.trim()||input.reason.length>4000))throw new ConsoleError(400,'INVALID_FEEDBACK','请填写反馈内容。');
-    return this.receipts.run(identity.uuid+':action:'+id+':'+action+':'+input.requestId,async()=>{
+    return this.receipts.run(identity.uuid+':action:'+id+':'+action+':'+input.requestId,async markSubmitted=>{
       const rpc=(m:string,p:any)=>this.rpc().request<any>(m,p);
       if(action==='rename'){await rpc('thread/name/set',{threadId:id,name:input.name.trim()});const session=this.sessions.get(id);if(session)session.title=input.name.trim();}
       if(action==='pin'){await rpc('thread/section/move',{threadId:id,sectionId:input.pinned?'01984de2-8f74-7c91-a3b2-5c5e937cf318':null});return {ok:true,pinned:input.pinned};}
       if(action==='archive')await rpc('thread/archive',{threadId:id});
-      if(action==='compact')await rpc('thread/compact/start',{threadId:id});
-      if(action==='review'){await this.open(project,id);await rpc('review/start',{threadId:id,target:input.target==='baseBranch'?{type:'baseBranch',branch:input.branch.trim()}:{type:'uncommittedChanges'},delivery:'inline'});}
+      if(action==='compact')await this.mainAction(id,()=>rpc('thread/compact/start',{threadId:id}),markSubmitted);
+      if(action==='review'){await this.open(project,id);await this.mainAction(id,()=>rpc('review/start',{threadId:id,target:input.target==='baseBranch'?{type:'baseBranch',branch:input.branch.trim()}:{type:'uncommittedChanges'},delivery:'inline'}),markSubmitted);}
       if(action==='feedback')await rpc('feedback/upload',{threadId:id,classification:'bug',reason:input.reason.trim(),includeLogs:false,extraLogFiles:[]});
       if(action==='fork'||action==='side'){if(input.environment&&input.environment!=='same-directory')throw new ConsoleError(400,'INVALID_ENVIRONMENT','此连接仅支持当前目录分支。');const r=await rpc('thread/fork',{threadId:id,ephemeral:action==='side',threadSource:'user',excludeTurns:true,deferGoalContinuation:true});if(!await this.sameRoot(project,r.thread?.cwd))throw new ConsoleError(502,'FORK_OUTCOME_UNKNOWN','分支结果未知，请检查 Codex。');this.usage?.bind(r.thread.id,identity,projectId,r.thread.model,r.thread.modelProvider);return {ok:true,thread:{id:r.thread.id,title:threadTitle(r.thread),status:runtimeStatus(r.thread)},temporary:action==='side'};}
       return {ok:true};
-    });
+    }, {trackSubmission:['compact','review'].includes(action)});
   }
   projects(identity: Identity):any[] {
     const projects=this.config.value.projects
@@ -603,6 +616,9 @@ export class CodexConsoleService {
       else content[0].text += `\n\nAttached project file: ${rel}`;
     }
     return this.receipts.run(`${identity.uuid}:${id}:${input.requestId}`, async markSubmitted => {
+      const slot = await this.turnGate.acquire(id);
+      let held = false, outcome: 'running' | 'complete' | 'rejected' | 'unknown' = 'rejected';
+      try {
       if (
         runtimeStatus(thread) === "running" ||
         session.status === "running" ||
@@ -614,16 +630,6 @@ export class CodexConsoleService {
           "This conversation or project is busy. Refresh before sending again."
         );
       if (
-        [...this.sessions.values()].filter((s) => s.status === "running").length +
-          this.reservations.size >=
-        this.config.value.maxConcurrentTurns
-      )
-        throw new ConsoleError(
-          409,
-          "CONCURRENCY_LIMIT",
-          "The configured concurrent task limit is reached."
-        );
-      if (
         [...this.sessions.values()].some((s) => s.root === project.root && s.status === "running")
       )
         throw new ConsoleError(
@@ -631,8 +637,7 @@ export class CodexConsoleService {
           "PROJECT_BUSY",
           "Only one task may modify this project at a time. Use a separate worktree project for parallel edits."
         );
-      this.reservations.add(project.root);
-      try {
+      this.reservations.add(project.root); held = true;
         const running = await this.rpc().request<any>("thread/list", {
           cwd: project.root,
           limit: 100,
@@ -646,7 +651,7 @@ export class CodexConsoleService {
           );
         const peer = this.rpc();
         this.usage?.bind(id,identity,projectId,model.model,thread.modelProvider,false,thread.serviceTier);
-        markSubmitted();
+        markSubmitted(); slot.submit(); outcome = 'unknown';
         const result = await peer.request<any>("turn/start", {
           threadId: id,
           input: content,
@@ -673,9 +678,10 @@ export class CodexConsoleService {
           threadId: id,
           payload: { status: session.status, turnId: session.turnId,metrics:this.usageSnapshot(id) }
         });
+        outcome = session.status === "running" ? "running" : "complete"; slot.finish(outcome, result.turn.id);
         return { turnId: result.turn.id, status: session.status };
       } finally {
-        this.reservations.delete(project.root);
+        slot.finish(outcome); if (held) this.reservations.delete(project.root);
       }
     }, { trackSubmission: true });
   }
@@ -830,6 +836,11 @@ export class CodexConsoleService {
     if (method === "skills/changed") { this.catalogs.clear(); return; }
     const id = p.threadId || p.thread?.id;
     if(id)this.usage?.observe(id,method,p);
+    if (id && ['turn/started','turn/completed','thread/status/changed'].includes(method)) {
+      // Only user/main threads are admitted or discovered by the gate; subagent events never reserve a slot.
+      if (method === 'turn/completed') this.turnGate.observe(id, 'idle', p.turn?.id);
+      else if (this.sessions.has(id)) this.turnGate.observe(id, method === 'turn/started' ? 'running' : runtimeStatus({status:p.status}), p.turn?.id);
+    }
     const session = this.sessions.get(id);
     if (!session) return;
     session.touched = Date.now();

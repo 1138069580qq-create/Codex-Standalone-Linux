@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { type UsageLedger } from './usage';
 import { CodexConsoleService } from './service';
+import { MAIN_TURN_LIMIT, readMainThreads, isMainThread } from './concurrency';
 import { ConsoleError, requireAdmin, isWithin, validateConfig, type Project, type ConfigStore, type Identity } from './config';
 import { CommandReceipts } from './receipts';
 import { DesktopNativeSession } from './desktop-native-session';
@@ -33,8 +34,13 @@ export class DesktopWorkspaceService extends CodexConsoleService {
   constructor(config:ConfigStore,receipts:CommandReceipts,readonly anchor:DesktopIpc,readonly tools:DesktopTaskTools|undefined,readonly stateFile:string,private makeSession=(ipc:DesktopIpc)=>new DesktopSessionService(config,receipts,ipc),private makeIpc=(id:string)=>new DesktopIpc(anchor.endpoint,id),readonly bridge?:DesktopBridgeApi){
     super(config,receipts);this.addSession(this.newSession(anchor));
   }
+  protected override async readMainTurnStates(){
+    if(this.bridge?.available)return readMainThreads(params=>this.bridge!.rpc('thread/list',params));
+    if(this.management&&this.tools){const result=await this.tools.listThreads();return [...result.pinnedThreads||[],...result.threads||[]].filter((t:any)=>t.kind==='codex'&&t.hostId==='local'&&isMainThread(t));}
+    return [...this.attached.values()].map(s=>({id:s.desktop.threadId,status:s.desktop.state?.threadRuntimeStatus}));
+  }
   private newSession(ipc:DesktopIpc,binding?:Project){return this.bridge?new DesktopSessionService(this.config,this.receipts,ipc,new DesktopModelCatalog(),this.bridge,binding):this.makeSession(ipc);}
-  private addSession(session:DesktopSessionService){if(this.usage)session.attachUsage(this.usage);this.attached.set(session.desktop.threadId,session);session.hub.subscribe(event=>{const {cursor,...rest}=event;if(event.type==='connection')this.hub.publish({...rest,payload:{connected:this.status({uuid:'',elevated:false}).connected}});else this.hub.publish(rest);});}
+  private addSession(session:DesktopSessionService){session.useTurnGate(this.turnGate);if(this.usage)session.attachUsage(this.usage);this.attached.set(session.desktop.threadId,session);session.hub.subscribe(event=>{const {cursor,...rest}=event;if(event.type==='connection')this.hub.publish({...rest,payload:{connected:this.status({uuid:'',elevated:false}).connected}});else this.hub.publish(rest);});}
   private async save(){const write=this.flushing.catch(()=>{}).then(async()=>{await fs.mkdir(path.dirname(this.stateFile),{recursive:true,mode:0o700});const data={version:1,tasks:[...this.known.values()],creations:[...this.creations.values()]};await fs.writeFile(this.stateFile+'.tmp',JSON.stringify(data),{mode:0o600});await fs.rename(this.stateFile+'.tmp',this.stateFile);});this.flushing=write;await write;}
   async initialize(){
     if(this.initialized)return;this.initialized=true;
@@ -47,10 +53,10 @@ export class DesktopWorkspaceService extends CodexConsoleService {
   protected override async readAccountMetadata(){if(!this.bridge?.available)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','账户接口未连接。');return this.bridge.rpc('account/read',{refreshToken:false});}
   override async connect(){await this.initialize();if(this.bridge&&!this.bridge.available)try{await this.bridge.connect();await this.syncDesktopProjects(true);}catch{};for(const session of this.attached.values())await session.connect();}
   override disconnect(){this.invalidateSubscription();for(const session of this.attached.values())session.disconnect();this.tools?.close();this.bridge?.close();}
-  override get hasActiveWork(){return [...this.attached.values()].some(s=>s.hasActiveWork);}
+  override get hasActiveWork(){return this.turnGate.count>0||this.creating.size>0||this.projectWrites.size>0||[...this.attached.values()].some(s=>s.hasActiveWork);}
   override status(identity:Identity):any{
     const base=this.attached.get(this.anchor.threadId)!.status(identity),native=!!this.bridge?.available;
-    return {...base,connected:[...this.attached.values()].some(s=>s.desktop.connected),capabilities:{...base.capabilities,switchThreads:native||this.management,createWithMessage:(native||this.management)&&!!identity.uuid,projects:native&&!!this.bridge?.app&&!!identity.uuid,projectless:native&&!!identity.uuid,extensions:native,mcp:native,quota:native,resetQuota:native,setGoal:native,taskActions:native,firstMessageExtensions:native},creationMode:native?'desktop-native':'desktop-current-directory'};
+    return {...base,maxConcurrentTurns:MAIN_TURN_LIMIT,connected:[...this.attached.values()].some(s=>s.desktop.connected),capabilities:{...base.capabilities,switchThreads:native||this.management,createWithMessage:(native||this.management)&&!!identity.uuid,projects:native&&!!this.bridge?.app&&!!identity.uuid,projectless:native&&!!identity.uuid,extensions:native,mcp:native,quota:native,resetQuota:native,setGoal:native,taskActions:native,firstMessageExtensions:native},creationMode:native?'desktop-native':'desktop-current-directory'};
   }
   override project(identity:Identity,id:string,capability:'view'|'send'|'approve'|'files'='view'):Project{
     if(id==='projectless'){if(!identity.uuid)throw new ConsoleError(401,'LOGIN_REQUIRED','请登录。');if(!this.config.value.enabled||!this.bridge?.available||!this.projectlessRoot)throw new ConsoleError(503,'PROJECTLESS_UNAVAILABLE','无项目对话接口尚未连接。');if(capability==='files')throw new ConsoleError(403,'PROJECTLESS_FILES','无项目对话不开放项目文件浏览。');return {id,name:'无项目对话',root:this.projectlessRoot,ownerId:identity.uuid,grants:[]};}
@@ -150,7 +156,7 @@ export class DesktopWorkspaceService extends CodexConsoleService {
   override async snapshot(identity:Identity,projectId:string,id:string):Promise<any>{const result=await(await this.session(identity,projectId,id)).snapshot(identity,projectId,id);return {...result,metrics:this.usageSnapshot(id),cursor:this.hub.cursor};}
   override async models(identity:Identity,projectId?:string,threadId?:string):Promise<any>{return (threadId&&projectId?await this.session(identity,projectId,threadId):this.attached.get(this.anchor.threadId)!).models(identity);}
   private checkProjectIdle(projectId:string,except?:string){if(projectId==='projectless')return;const project=this.config.value.projects.find(p=>p.id===projectId);if(this.projectWrites.has(projectId)||[...this.attached.values()].some(s=>s.desktop.threadId!==except&&path.resolve(s.desktop.state.cwd)===project?.root&&s.hasActiveWork))throw new ConsoleError(409,'PROJECT_BUSY','此目录中已有任务运行，请等待完成后再发送。');}
-  override async send(identity:Identity,projectId:string,id:string,input:any):Promise<any>{this.project(identity,projectId,'send');this.checkProjectIdle(projectId,id);const key='send:'+id;this.projectWrites.set(projectId,key);try{return(await this.session(identity,projectId,id)).send(identity,projectId,id,input);}finally{if(this.projectWrites.get(projectId)===key)this.projectWrites.delete(projectId);}}
+  override async send(identity:Identity,projectId:string,id:string,input:any):Promise<any>{this.project(identity,projectId,'send');this.checkProjectIdle(projectId,id);const key='send:'+id;this.projectWrites.set(projectId,key);try{return await(await this.session(identity,projectId,id)).send(identity,projectId,id,input);}finally{if(this.projectWrites.get(projectId)===key)this.projectWrites.delete(projectId);}}
   override async interrupt(identity:Identity,projectId:string,id:string):Promise<any>{this.project(identity,projectId,'send');return(await this.session(identity,projectId,id)).interrupt(identity,projectId,id);}
   override async createThread():Promise<never>{throw new ConsoleError(409,'DESKTOP_FIRST_MESSAGE_REQUIRED','请在新任务输入首条消息后创建。');}
   private record(identity:Identity,requestId:string){if(!identity.uuid)throw new ConsoleError(401,"LOGIN_REQUIRED","请登录。");const value=this.creations.get(`${identity.uuid}:${requestId}`);if(!value)throw new ConsoleError(404,'CREATION_NOT_FOUND','未找到这次创建请求。');this.project(identity,value.projectId,'send');return value;}
@@ -164,7 +170,7 @@ export class DesktopWorkspaceService extends CodexConsoleService {
   }
   override async createTask(identity:Identity,projectId:string,input:any):Promise<any>{
     if(this.bridge?.available)return this.createNativeTask(identity,projectId,input);
-    requireAdmin(identity);this.project(identity,projectId,'send');
+    this.project(identity,projectId,'send');
     const key=identity.uuid+':'+String(input?.requestId),fingerprint=createHash('sha256').update(JSON.stringify({projectId,input})).digest('hex'),existing=this.submissions.get(key);
     if(existing){if(existing.fingerprint!==fingerprint)throw new ConsoleError(409,'CREATION_CHANGED','创建请求内容已改变。');return existing.promise;}
     const isNew=!this.creations.has(key);if(isNew){this.checkProjectIdle(projectId);this.projectWrites.set(projectId,key);}
@@ -183,14 +189,15 @@ export class DesktopWorkspaceService extends CodexConsoleService {
     const saved=(await this.tools.listProjects()).projects?.find((p:any)=>p.projectKind==='local'&&typeof p.path==='string'&&path.resolve(p.path)===project.root);if(!saved)throw new ConsoleError(409,'PROJECT_NOT_SAVED','请先在桌面中保存此项目，再从网页创建任务。');
     const args:any={prompt:input.text,title:input.text.trim().slice(0,60),target:{type:'project',projectId:saved.projectId,environment:{type:'local'}}};
     if(overrides.includes('model')||overrides.includes('effort')){const {data}=await this.models(identity);const selected=data.find((m:any)=>m.model===input.model);if(!selected)throw new ConsoleError(400,'MODEL_UNAVAILABLE','请选择桌面目录中的模型。');args.model=selected.model;if(input.effort){if(!selected.supportedReasoningEfforts.some((r:any)=>r.reasoningEffort===input.effort))throw new ConsoleError(400,'EFFORT_UNAVAILABLE','此模型不支持该推理强度。');args.thinking=input.effort;}}
+    const slot=await this.turnGate.acquire();
     // Persist before the only mutating request. Reloads/timeouts never recreate a task.
     const row:Creation={key,userId:identity.uuid,requestId:input.requestId,projectId,fingerprint,at:Date.now(),status:'submitting'};this.creations.set(key,row);
-    const work=(async()=>{await this.save();try{const reply=await this.tools!.createTask(args,createHash('sha256').update(key).digest('hex'));if(reply.hostId&&reply.hostId!=='local')throw new Error('Unexpected remote host');
+    const work=(async()=>{try{await this.save();slot.submit();const reply=await this.tools!.createTask(args,createHash('sha256').update(key).digest('hex'));if(reply.hostId&&reply.hostId!=='local')throw new Error('Unexpected remote host');
       const id=reply.threadId||reply.conversationId;
-      if(validId(id)){this.usage?.bind(id,identity,projectId,undefined,undefined,true);row.threadId=id;row.status='ready';row.messageAccepted=reply.threadId?true:reply.firstTurn?.status==='accepted'?true:['not-started','rejected','not-requested'].includes(reply.firstTurn?.status)?false:null;if(row.messageAccepted!==true)row.message=row.messageAccepted===false?'任务已创建，但首条消息未开始。可在该任务中手动重新发送。':'任务已创建，但首条消息是否开始尚未确认。请先查看输出，不要重复发送。';}
+      if(validId(id)){slot.bind(id);this.usage?.bind(id,identity,projectId,undefined,undefined,true);row.threadId=id;row.status='ready';row.messageAccepted=reply.threadId?true:reply.firstTurn?.status==='accepted'?true:['not-started','rejected','not-requested'].includes(reply.firstTurn?.status)?false:null;if(row.messageAccepted!==true)row.message=row.messageAccepted===false?'任务已创建，但首条消息未开始。可在该任务中手动重新发送。':'任务已创建，但首条消息是否开始尚未确认。请先查看输出，不要重复发送。';}
       else{row.status='unknown';if(typeof reply.clientThreadId==='string')row.clientThreadId=reply.clientThreadId;row.message='桌面创建结果尚未确认。请检查桌面任务列表，不要重复提交。';}
     }catch(error){row.status=error instanceof ConsoleError&&error.code==='DESKTOP_TOOL_REJECTED'?'failed':'unknown';row.message=row.status==='failed'?'桌面未能创建任务，请查看桌面错误。':'创建结果未知，请检查桌面任务列表，不要重复提交。';}await this.save();return row;})();this.creating.set(key,work);
-    try{return this.result(identity,await work);}finally{this.creating.delete(key);}
+    try{return await this.result(identity,await work);}finally{slot.finish(row.status==='failed'||row.messageAccepted===false?'rejected':row.messageAccepted===true?'running':'unknown');this.creating.delete(key);}
   }
   private async matchesProject(project:Project,thread:any){
     if(typeof thread.cwd!=='string')return false;const cwd=await fs.realpath(thread.cwd).catch(()=>null);if(!cwd)return false;
@@ -231,9 +238,12 @@ export class DesktopWorkspaceService extends CodexConsoleService {
     const start:any={threadSource:'user',ephemeral:false,projectId:projectId==='projectless'?null:project.desktopProjectId};
     if(overrides.includes('model')||overrides.includes('effort')){const {data}=await this.models(identity);const model=data.find((m:any)=>m.model===input.model);if(!model)throw new ConsoleError(400,'MODEL_UNAVAILABLE','请选择桌面目录中的模型。');if(input.effort&&!model.supportedReasoningEfforts.some((r:any)=>r.reasoningEffort===input.effort))throw new ConsoleError(400,'EFFORT_UNAVAILABLE','此模型不支持该推理强度。');start.model=model.model;}
     if(overrides.includes('mode')&&!['code','plan'].includes(input.mode))throw new ConsoleError(400,'INVALID_MODE','无效的协作模式。');
-    let turnOverrides:any={};if(overrides.includes('access')){if(!['default','read-only','full'].includes(input.access))throw new ConsoleError(400,'INVALID_ACCESS','无效的访问权限。');if(input.access==='full')requireAdmin(identity);if(input.access==='full'&&input.confirmFullAccess!==true)throw new ConsoleError(400,'ACCESS_CONFIRMATION_REQUIRED','请确认完全访问权限。');turnOverrides.sandboxPolicy=input.access==='full'?{type:'dangerFullAccess'}:input.access==='read-only'?{type:'readOnly'}:{type:'workspaceWrite',writableRoots:[project.root]};turnOverrides.approvalPolicy=input.access==='full'?'never':'on-request';turnOverrides.approvalsReviewer='user';}if(overrides.includes('effort'))turnOverrides.effort=input.effort||null;if(overrides.includes('model'))turnOverrides.model=start.model;if(overrides.includes('mode'))turnOverrides.collaborationMode={mode:input.mode==='plan'?'plan':'default',settings:{model:start.model||null,reasoning_effort:input.effort||null,developer_instructions:null}};
-    if(!identity.elevated&&!turnOverrides.sandboxPolicy){turnOverrides.sandboxPolicy={type:'workspaceWrite',writableRoots:[project.root]};turnOverrides.approvalPolicy='on-request';turnOverrides.approvalsReviewer='user';}
+    let turnOverrides:any={};if(overrides.includes('access')){if(!['default','read-only','full'].includes(input.access))throw new ConsoleError(400,'INVALID_ACCESS','无效的访问权限。');if(input.access==='full'&&input.confirmFullAccess!==true)throw new ConsoleError(400,'ACCESS_CONFIRMATION_REQUIRED','请确认完全访问权限。');turnOverrides.sandboxPolicy=input.access==='full'?{type:'dangerFullAccess'}:input.access==='read-only'?{type:'readOnly'}:{type:'workspaceWrite',writableRoots:[project.root]};turnOverrides.approvalPolicy=input.access==='full'?'never':'on-request';turnOverrides.approvalsReviewer='user';}if(overrides.includes('effort'))turnOverrides.effort=input.effort||null;if(overrides.includes('model'))turnOverrides.model=start.model;if(overrides.includes('mode'))turnOverrides.collaborationMode={mode:input.mode==='plan'?'plan':'default',settings:{model:start.model||null,reasoning_effort:input.effort||null,developer_instructions:null}};
+
     const concurrent=this.creations.get(key);if(concurrent){if(concurrent.fingerprint!==fingerprint)throw new ConsoleError(409,'CREATION_CHANGED','创建请求内容已改变。');return this.result(identity,await(this.creating.get(key)||concurrent));}this.checkProjectIdle(projectId);
+    const slot=await this.turnGate.acquire();
+    const admitted=this.creations.get(key);if(admitted){slot.finish('rejected');if(admitted.fingerprint!==fingerprint)throw new ConsoleError(409,'CREATION_CHANGED','创建请求内容已改变。');return this.result(identity,await(this.creating.get(key)||admitted));}
+    try{this.checkProjectIdle(projectId);}catch(error){slot.finish('rejected');throw error;}
     const row:Creation={key,userId:identity.uuid,requestId:input.requestId,projectId,fingerprint,at:Date.now(),status:'submitting'};this.creations.set(key,row);this.projectWrites.set(projectId,key);
     const work=(async()=>{try{await this.save();
       const cwd=projectId==='projectless'?(await this.bridge!.host('projectless-thread-cwd',{createSplitDirectories:false,prompt:input.text.slice(0,120)})).cwd:project.root;
@@ -241,22 +251,22 @@ export class DesktopWorkspaceService extends CodexConsoleService {
       const created=await this.bridge!.rpc('thread/start',{...start,cwd,runtimeWorkspaceRoots:[cwd]});const t=created.thread;
       if(!validId(t?.id)||await fs.realpath(t.cwd)!==await fs.realpath(cwd))throw new Error('Unexpected created task');
       this.usage?.bind(t.id,identity,projectId,start.model||created.model||t.model,t.modelProvider,true);
-      row.threadId=t.id;row.status='ready';row.messageAccepted=false;
+      slot.bind(t.id);row.threadId=t.id;row.status='ready';row.messageAccepted=false;
       this.known.set(t.id,{id:t.id,projectId,title:input.text.trim().slice(0,60),cwd:t.cwd,status:'idle',updatedAt:Date.now()});await this.save();
       if(projectId!=='projectless')await this.assignDesktopProject(project,t.id,t.projectId);
       if(turnOverrides.sandboxPolicy?.type==='workspaceWrite')turnOverrides.sandboxPolicy.writableRoots=[cwd];
       if(turnOverrides.collaborationMode){turnOverrides.collaborationMode.settings.model ||= created.model;turnOverrides.collaborationMode.settings.reasoning_effort ||= created.reasoningEffort||null;}
       // Persist an ambiguous-send marker before the sole first-turn call. No automatic replay.
       row.messageAccepted=null;await this.save();
-      try{await this.bridge!.rpc('turn/start',{threadId:t.id,clientUserMessageId:input.requestId,input:content,...turnOverrides});row.messageAccepted=true;}
+      try{slot.submit();const sent=await this.bridge!.rpc('turn/start',{threadId:t.id,clientUserMessageId:input.requestId,input:content,...turnOverrides});row.messageAccepted=true;slot.finish(sent.turn?.status&&runtimeStatus(sent.turn)!=='running'?'complete':'running',sent.turn?.id);}
       catch(error){row.messageAccepted=error instanceof ConsoleError&&error.code==='DESKTOP_BRIDGE_REJECTED'?false:null;row.message=row.messageAccepted===false?'任务已创建，首条消息被拒绝。草稿已保留，可检查后重新发送。':'任务已创建，首条消息结果未知，请先查看桌面输出。';}
-    }catch(error){if(!row.threadId){row.status=error instanceof ConsoleError&&error.code==='DESKTOP_BRIDGE_REJECTED'?'failed':'unknown';row.message=row.status==='failed'?'桌面未能创建任务。':'创建结果未知，请检查桌面任务列表，不要重复提交。';}else row.message='任务已创建，首条消息尚未发送，请检查任务后继续。';}finally{if(this.projectWrites.get(projectId)===key)this.projectWrites.delete(projectId);}await this.save();return row;})();
+    }catch(error){if(!row.threadId){row.status=error instanceof ConsoleError&&error.code==='DESKTOP_BRIDGE_REJECTED'?'failed':'unknown';row.message=row.status==='failed'?'桌面未能创建任务。':'创建结果未知，请检查桌面任务列表，不要重复提交。';}else row.message='任务已创建，首条消息尚未发送，请检查任务后继续。';}finally{slot.finish(row.status==='failed'||row.messageAccepted===false?'rejected':row.messageAccepted===true?'running':'unknown');if(this.projectWrites.get(projectId)===key)this.projectWrites.delete(projectId);}await this.save();return row;})();
     this.creating.set(key,work);try{return this.result(identity,await work);}finally{this.creating.delete(key);}
   }
   override async taskAction(identity:Identity,projectId:string,id:string,action:string,input:any):Promise<any>{
     const project=this.project(identity,projectId,'send');if(!this.bridge?.available)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','桌面功能接口未连接。');
     const session=await this.session(identity,projectId,id);
-    if(['pin','archive','fork','side','feedback'].includes(action))requireAdmin(identity);
+
     if(!['rename','pin','archive','fork','side','compact','review','feedback'].includes(action))throw new ConsoleError(400,'INVALID_ACTION','未知操作。');
     if(!/^[-a-zA-Z0-9_]{8,100}$/.test(input.requestId||''))throw new ConsoleError(400,'INVALID_REQUEST_ID','无效请求 ID。');
     if(['archive','fork','side','compact','review','feedback'].includes(action)&&input.confirmed!==true)throw new ConsoleError(400,'CONFIRMATION_REQUIRED','请确认操作。');
@@ -266,18 +276,18 @@ export class DesktopWorkspaceService extends CodexConsoleService {
     if(action==='pin'&&typeof input.pinned!=='boolean')throw new ConsoleError(400,'INVALID_PIN','无效的置顶状态。');
     if(action==='review'&&(input.target!=='uncommittedChanges'&&!(input.target==='baseBranch'&&typeof input.branch==='string'&&input.branch.trim()&&input.branch.length<=200)))throw new ConsoleError(400,'INVALID_REVIEW','请选择未提交更改或填写比较分支。');
     if(action==='feedback'&&(typeof input.reason!=='string'||!input.reason.trim()||input.reason.length>4000))throw new ConsoleError(400,'INVALID_FEEDBACK','请填写反馈内容。');
-    return this.receipts.run(identity.uuid+':action:'+id+':'+action+':'+input.requestId,async()=>{
+    return this.receipts.run(identity.uuid+':action:'+id+':'+action+':'+input.requestId,async markSubmitted=>{
       const rpc=(method:string,params:any)=>this.bridge!.rpc(method,params);
       const row=this.known.get(id)!;
       switch(action){
         case 'rename':await rpc('thread/name/set',{threadId:id,name:input.name.trim()});row.title=input.name.trim();break;
-        case 'pin':{requireAdmin(identity);const result=await this.bridge!.host('set-thread-pinned',{threadId:id,pinned:input.pinned,useAppServerPins:true});if(result?.success!==true)throw new ConsoleError(502,'PIN_NOT_CONFIRMED','桌面未确认置顶更改，请刷新状态。');row.pinned=input.pinned;break;}
-        case 'archive':requireAdmin(identity);await rpc('thread/archive',{threadId:id});row.archived=true;break;
-        case 'compact':await session.desktop.request('thread-follower-compact-thread',{conversationId:id},1);break;
-        case 'review':await rpc('review/start',{threadId:id,target:input.target==='baseBranch'?{type:'baseBranch',branch:input.branch.trim()}:{type:'uncommittedChanges'},delivery:'inline'});break;
-        case 'feedback':requireAdmin(identity);await rpc('feedback/upload',{threadId:id,classification:'bug',reason:input.reason.trim(),includeLogs:false,extraLogFiles:[]});break;
+        case 'pin':{const result=await this.bridge!.host('set-thread-pinned',{threadId:id,pinned:input.pinned,useAppServerPins:true});if(result?.success!==true)throw new ConsoleError(502,'PIN_NOT_CONFIRMED','桌面未确认置顶更改，请刷新状态。');row.pinned=input.pinned;break;}
+        case 'archive':await rpc('thread/archive',{threadId:id});row.archived=true;break;
+        case 'compact':await this.mainAction(id,()=>session.desktop.request('thread-follower-compact-thread',{conversationId:id},1),markSubmitted);break;
+        case 'review':await this.mainAction(id,()=>rpc('review/start',{threadId:id,target:input.target==='baseBranch'?{type:'baseBranch',branch:input.branch.trim()}:{type:'uncommittedChanges'},delivery:'inline'}),markSubmitted);break;
+        case 'feedback':await rpc('feedback/upload',{threadId:id,classification:'bug',reason:input.reason.trim(),includeLogs:false,extraLogFiles:[]});break;
         case 'fork':case 'side':{
-          requireAdmin(identity);if(input.environment&&input.environment!=='same-directory')throw new ConsoleError(400,'UNSUPPORTED_FORK_ENVIRONMENT','网页目前仅支持当前目录分支。');
+          if(input.environment&&input.environment!=='same-directory')throw new ConsoleError(400,'UNSUPPORTED_FORK_ENVIRONMENT','网页目前仅支持当前目录分支。');
           const reply=await rpc('thread/fork',{threadId:id,ephemeral:action==='side',threadSource:'user',excludeTurns:true,deferGoalContinuation:true});
           if(!validId(reply.thread?.id)||!await this.matchesProject(project,reply.thread))throw new ConsoleError(502,'FORK_OUTCOME_UNKNOWN','分支结果未知，请检查桌面。');
           const t=reply.thread;this.usage?.bind(t.id,identity,projectId,t.model,t.modelProvider);this.known.set(t.id,{ownerId:identity.uuid,id:t.id,projectId,cwd:t.cwd,title:t.name||'分支 · '+row.title,status:runtimeStatus(t),kind:action==='side'?'side':'thread'});await this.save();
@@ -285,7 +295,7 @@ export class DesktopWorkspaceService extends CodexConsoleService {
         }
       }
       await this.save();return {ok:true,...(action==='pin'?{pinned:row.pinned}:{})};
-    });
+    },{trackSubmission:['compact','review'].includes(action)});
   }
 
 }

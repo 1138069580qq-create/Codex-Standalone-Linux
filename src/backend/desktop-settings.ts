@@ -62,7 +62,7 @@ export function desktopOverrides(state:any,input:any,models:any[],identity:Ident
   if(!Array.isArray(overrides)||overrides.length>4||overrides.some((k:any)=>!['model','effort','mode','access'].includes(k)))throw new ConsoleError(400,'INVALID_SETTINGS','无效的任务设置。');
   const result:any={},current=desktopSettings(state);
   if(overrides.includes('access'))Object.assign(result,accessPolicy(identity,root,input.access,input.confirmFullAccess),{approvalsReviewer:'user'});
-  else if(!identity.elevated)throw new ConsoleError(403,'DESKTOP_PERMISSION_CONFIRMATION','请为此账号显式选择默认或只读权限。');
+
   if(overrides.some((k:string)=>['model','effort','mode'].includes(k))){
     const modelName=overrides.includes('model')?input.model:current.model;
     const model=models.find(m=>m.model===modelName);

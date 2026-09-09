@@ -21,3 +21,5 @@
 @media(max-width:720px){.run-metrics{padding:0 12px 10px;font-size:10px}.run-metrics>span{padding:0 6px}.usage-dialog{padding:16px}.usage-hero-header{flex-wrap:wrap;gap:18px}.usage-hero-header>.usage-metric:first-child{width:100%}.usage-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.usage-hero,.usage-chart-card{padding:15px}.usage-toolbar select{max-width:180px}.usage-legend{gap:12px;font-size:10px}}
 
 .usage-dialog>.dialog-header{position:sticky;top:-26px;z-index:2;background:var(--panel);margin:-26px -26px 20px;padding:20px 26px;border-bottom:1px solid var(--line)}.usage-metric progress{width:100%;accent-color:var(--accent)}@media(max-width:720px){.usage-dialog>.dialog-header{top:-16px;margin:-16px -16px 16px;padding:16px}}
+
+.auth-tabs{display:flex;gap:8px;margin-bottom:18px}.auth-tabs button{flex:1}.auth-tabs .active{background:var(--accent,#b4e9d5);color:#10251e}.layer-message{padding:12px;border-radius:8px;background:var(--panel,#171f23);border:1px solid currentColor;overflow-wrap:anywhere}.quota-window+.usage-metric{margin-top:16px}

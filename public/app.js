@@ -12,9 +12,24 @@ const stateName = v => ({idle:'待命',running:'运行中',inProgress:'运行中
 const labelType = v => ({userMessage:'你',agentMessage:'Codex',commandExecution:'命令',fileChange:'文件变更',reasoning:'公开摘要',plan:'计划'})[v] || v;
 function el(tag, text, className) { const node=document.createElement(tag); if(text!==undefined) node.textContent=text; if(className) node.className=className; return node; }
 let toastTimer;
-function toast(message, bad=false) { $('toast').textContent=message; $('toast').className=`toast${bad?' error':''}`; $('toast').hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('toast').hidden=true,6000); }
-function notice(message='') { $('notice').textContent=message; $('notice').hidden=!message; }
-function action(fn) { return async event => { event?.preventDefault(); const target=event?.currentTarget; const isButton=target?.tagName==='BUTTON'; if(isButton) target.disabled=true; try { await fn(event); } catch(error) { toast(error.message,true); } finally { if(isButton) target.disabled=false; controls(); } }; }
+const dialogStack=[];
+for(const dialog of document.querySelectorAll('dialog')){
+  const show=dialog.showModal.bind(dialog);
+  dialog.showModal=function(){if(!this.open){const error=this.querySelector('[data-layer-message]');if(error){error.textContent='';error.hidden=true;}show();}const i=dialogStack.indexOf(this);if(i>=0)dialogStack.splice(i,1);dialogStack.push(this);};
+  dialog.addEventListener('close',()=>{if(!dialog.open){const i=dialogStack.indexOf(dialog);if(i>=0)dialogStack.splice(i,1);}});
+}
+function messageLayer(target){return target?.closest?.('dialog[open]')||dialogStack.findLast(d=>d.open)||(!S.user?$('login-form'):null);}
+function layerMessage(message='',bad=true,layer=messageLayer()){
+  let node;
+  if(layer?.id==='login-form')node=$('login-error');
+  else if(layer?.open){node=layer.querySelector('[data-layer-message]');if(!node){node=el('p');node.dataset.layerMessage='true';const header=layer.querySelector('.dialog-header');if(header)header.after(node);else layer.prepend(node);}node.className=bad?'error layer-message':'notice layer-message';node.setAttribute('role',bad?'alert':'status');}
+  else node=$('notice');
+  node.textContent=message;node.hidden=!message;
+  if(message&&layer?.open)layer.scrollTop=0;
+}
+function toast(message,bad=false,layer=messageLayer()) { if(bad||layer){layerMessage(message,bad,layer);return;} $('toast').textContent=message;$('toast').className='toast';$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,6000); }
+function notice(message='') { layerMessage(message,false,null); }
+function action(fn) { return async event => { event?.preventDefault();const target=event?.currentTarget,layer=messageLayer(target),isButton=target?.tagName==='BUTTON';if(isButton)target.disabled=true;try{await fn(event);}catch(error){toast(error.message,true,layer?.open||layer?.id==='login-form'?layer:messageLayer());}finally{if(isButton)target.disabled=false;controls();} }; }
 async function api(url, body, method=body===undefined?'GET':'POST') {
   const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),45000);
   try {
@@ -37,7 +52,7 @@ const apiProject = (route, extra={}) => `/api/codex/${route}?${q({projectId:S.pr
 function permission(name) { return !!S.project?.permissions?.[name]; }
 function closeStream() { clearTimeout(S.timer); S.timer=null; S.stream?.close(); S.stream=null; }
 function clearConversation() { globalThis.CodexUsage?.metrics(null); clearTimeout(S.creationTimer);S.creationTimer=null;S.newTask=false;S.newTaskConfirmed=false;S.modelRequest=null;S.modelsUnavailable=false;S.taskCreation=null;S.epoch++; closeStream(); if(!S.sideOrigin)$('side-context').hidden=true; clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='新任务'; S.selected=[]; S.references=[]; S.goalDraft=''; S.accessConfirmed=false; S.tokenUsage=null; S.threadSettings=null; S.settingsOverrides={}; $('access').value='default'; closeMenu(); $('prompt').value=''; renderAttachments(); controls(); }
-function loggedOut() { globalThis.CodexUsage?.reset(); S.sideOrigin=null;$('side-context').hidden=true;$('side-history').replaceChildren();clearConversation(); S.user=null; S.csrf=''; S.connected=false; S.attachedThreadId=null; S.capabilities={}; S.projects=[]; S.threads=[]; S.project=null; S.models=[]; S.items.clear(); $('workspace').hidden=true; $('login-view').hidden=false; $('settings-dialog').close(); $('new-thread-dialog').close(); for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close(); $('password').value=''; S.catalog=null; }
+function loggedOut() { globalThis.CodexUsage?.reset(); S.sideOrigin=null;$('side-context').hidden=true;$('side-history').replaceChildren();clearConversation(); S.user=null; S.csrf=''; S.connected=false; S.attachedThreadId=null; S.capabilities={}; S.projects=[]; S.threads=[]; S.project=null; S.models=[]; S.items.clear(); $('workspace').hidden=true; $('login-view').hidden=false; $('settings-dialog').close(); $('new-thread-dialog').close(); for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close(); setAuthMode('login'); S.catalog=null; }
 function supports(capability) {
   if(capability==='createThread' && S.attachedThreadId)return false;
   return S.capabilities?.[capability]!==false;
@@ -61,7 +76,7 @@ function controls() {
   $('attach').disabled=!ready || S.sending || S.newTask&&S.capabilities?.firstMessageExtensions!==true;
   $('access').disabled=!ready || S.sending || S.newTask&&S.capabilities?.firstMessageExtensions!==true;
   for(const id of ['model','effort','mode'])$(id).disabled=!ready || S.sending || (id!=='mode'&&S.modelsUnavailable) || (id==='mode'&&S.newTask&&S.capabilities?.firstMessageExtensions!==true);
-  $('access').querySelector('option[value=full]').disabled=!S.user?.admin;
+  $('access').querySelector('option[value=full]').disabled=!S.user;
   $('sidebar-plugins').disabled=!S.connected || !S.project || !supports('extensions');
   $('sidebar-plugins').title=supports('extensions')?'':'技能接口未连接。';
   $('new-thread').hidden=!supports('createThread')&&S.capabilities?.createWithMessage!==true;
@@ -433,9 +448,20 @@ function shortDate(value){return new Date(value<1e12?value*1000:value).toLocaleS
 async function loadFiles(){if(!permission('files'))throw new Error('没有文件权限。');const epoch=S.epoch;const requested=S.filePath;const result=await api(apiProject('files',{path:requested}));if(epoch!==S.epoch||requested!==S.filePath)return;$('file-path').textContent=`/${requested==='.'?'':requested}`;$('file-list').replaceChildren();for(const entry of result.entries){if(entry.type==='directory'){const button=el('button',`▸ ${entry.name}`,'file-entry');button.onclick=action(async()=>{S.filePath=entry.path;await loadFiles();});$('file-list').append(button);}else{const link=el('a',entry.name,'file-entry');link.href=apiProject('files/content',{path:entry.path});link.download=entry.name;link.append(el('span',bytes(entry.size)));$('file-list').append(link);}}if(!result.entries.length)$('file-list').append(el('p','空目录或没有可展示的文件。','footnote')); }
 async function loadDiff(){if(!permission('files'))throw new Error('没有文件权限。');const epoch=S.epoch;const result=await api(apiProject('diff'));if(epoch===S.epoch)$('diff-content').textContent=(result.text||'没有未提交的差异。')+(result.truncated?'\n[已截断到 256 KiB]':''); }
 async function switchPanel(panel){S.panel=panel;for(const name of ['quota','files','diff'])$('panel-'+name).hidden=name!==panel;for(const b of document.querySelectorAll('[data-panel]')){const active=b.dataset.panel===panel;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active));}if(panel==='files')await loadFiles();if(panel==='quota')await loadQuota();}
-async function openSettings(){const config=await api('/api/codex/admin/config');$('transport').value=config.transport.type;$('endpoint').value=config.transport.endpoint;$('token-env').value=config.transport.bearerTokenEnv||'';$('concurrency').value=config.maxConcurrentTurns;$('enabled').checked=config.enabled;$('projects-json').value=JSON.stringify(config.projects,null,2);$('candidates').replaceChildren();await loadUsers();$('settings-dialog').showModal();}
+async function openSettings(){$('settings-dialog').showModal();const config=await api('/api/codex/admin/config');$('transport').value=config.transport.type;$('endpoint').value=config.transport.endpoint;$('token-env').value=config.transport.bearerTokenEnv||'';$('concurrency').value=5;$('enabled').checked=config.enabled;$('projects-json').value=JSON.stringify(config.projects,null,2);$('candidates').replaceChildren();await loadUsers();}
 async function loadUsers(){const users=await api('/api/admin/users');$('users-list').replaceChildren();for(const user of users){const row=el('div',undefined,'user-record'),info=el('div');info.append(el('strong',`${user.username}${user.admin?' · 管理员':''}`),el('code',user.id));const edit=el('button','编辑','small');edit.type='button';edit.onclick=()=>{$('edit-user-id').value=user.id;$('new-username').value=user.username;$('new-admin').checked=user.admin;$('new-password').value='';$('new-username').focus();};row.append(info,edit);$('users-list').append(row);} }
-$('login-form').onsubmit=async event=>{event.preventDefault();const button=event.submitter;button.disabled=true;$('login-error').textContent='';try{const result=await api('/api/login',{username:$('username').value,password:$('password').value});await signedIn(result);}catch(error){$('login-error').textContent=error.message;}finally{button.disabled=false;}};
+let authMode='login';
+function setAuthMode(mode){
+  authMode=mode;const registering=mode==='register';$('login-title').textContent=registering?'注册普通账户':'登录';$('login-submit').textContent=registering?'注册并登录':'登录';$('register-note').hidden=!registering;
+  $('password').autocomplete=registering?'new-password':'current-password';$('password').minLength=registering?12:0;$('password').value='';$('password-confirm').value='';$('password-confirm-label').hidden=!registering;$('password-confirm').required=registering;
+  $('login-error').textContent='';for(const mode of ['login','register']){$('auth-'+mode).classList.toggle('active',authMode===mode);$('auth-'+mode).setAttribute('aria-selected',String(authMode===mode));}
+}
+$('auth-login').onclick=()=>setAuthMode('login');$('auth-register').onclick=()=>setAuthMode('register');
+$('login-form').onsubmit=async event=>{
+  event.preventDefault();const button=$('login-submit'),mode=authMode;button.disabled=true;$('auth-login').disabled=true;$('auth-register').disabled=true;$('login-error').textContent='';$('login-error').hidden=false;
+  try{if(mode==='register'&&$('password').value!==$('password-confirm').value)throw new Error('两次输入的密码不一致。');const result=await api('/api/'+mode,{username:$('username').value.trim(),password:$('password').value});$('password-confirm').value='';await signedIn(result);}
+  catch(error){$('login-error').textContent=error.message;}finally{button.disabled=false;$('auth-login').disabled=false;$('auth-register').disabled=false;}
+};
 $('logout').onclick=action(async()=>{await api('/api/logout',{});loggedOut();});
 $('project-select').onchange=action(()=>chooseProject($('project-select').value));
 $('thread-filter').oninput=renderThreads;$('refresh-threads').onclick=action(()=>loadThreads());$('more-threads').onclick=action(()=>loadThreads(true));
@@ -586,7 +612,7 @@ function finishConfirm(value){const resolve=confirmResolve;confirmResolve=null;$
 async function selectAccess(){
   markSettings('access');S.accessConfirmed=false;
   if($('access').value==='full'){
-    const confirmed=S.user?.admin&&await confirmAction('完全访问','允许 Codex 访问项目外文件和网络，并跳过操作审批。仅对可信任务启用。');
+    const confirmed=!!S.user&&await confirmAction('完全访问','允许 Codex 访问项目外文件和网络，并跳过操作审批。仅对可信任务启用。');
     if(confirmed)S.accessConfirmed=true;else $('access').value='default';
   }
 }
@@ -601,8 +627,8 @@ async function showStatus(){
 }
 async function openGoal(){
   $('goal-objective').value=S.goalDraft;
-  if(S.thread){try{const result=await api(apiProject(`threads/${encodeURIComponent(S.thread.id)}/goal`));$('goal-objective').value=result.goal?.objective||'';}catch(error){toast(error.message,true);}}
   $('goal-dialog').showModal();
+  if(S.thread){try{const result=await api(apiProject(`threads/${encodeURIComponent(S.thread.id)}/goal`));$('goal-objective').value=result.goal?.objective||'';}catch(error){toast(error.message,true);}}
 }
 async function openReferences(){S.referencePath='.';$('reference-dialog').showModal();await renderReferences();}
 function addReference(value){if(S.references.length>=12)throw new Error('最多引用 12 个文件或文件夹。');if(!S.references.includes(value))S.references.push(value);renderAttachments();$('reference-dialog').close();$('prompt').focus();}

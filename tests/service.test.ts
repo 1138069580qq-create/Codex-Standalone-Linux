@@ -53,7 +53,7 @@ class FakeCodexPeer extends EventEmitter {
       case "thread/turns/list":
         return { data: [], nextCursor: null } as T;
       case "thread/list":
-        return { data: this.threads.filter((thread) => thread.cwd === params.cwd) } as T;
+        return { data: this.threads.filter((thread) => !params.cwd || thread.cwd === params.cwd) } as T;
       case "model/list":
         return {
           data: [
@@ -351,10 +351,10 @@ test("skill selection and read-only access reach turn/start as structured inputs
   peer.resolveTurnStart('thread-alpha');await pending;
 });
 
-test("forged full access and cross-project extension requests cannot start a turn", async t => {
+test("unconfirmed full access and cross-project extension requests cannot start a turn", async t => {
   const {service,peer,identity}=await fixture();t.after(()=>service.disconnect());
   await assert.rejects(service.extensions({uuid:'outsider',elevated:false},'alpha'),/denied/i);
-  await assert.rejects(service.send(identity,'alpha','thread-alpha',{text:'Hello',requestId:'forged-full-access',access:'full',confirmFullAccess:true}),/管理员/);
+  await assert.rejects(service.send(identity,'alpha','thread-alpha',{text:'Hello',requestId:'forged-full-access',access:'full',confirmFullAccess:false}),/确认/);
   assert.equal(peer.turnStarts.length,0);
 });
 
@@ -382,4 +382,8 @@ test('a project-busy preflight does not poison the same message id for a later m
   await Promise.race([peer.waitForTurnStarts(1),sending]);peer.resolveTurnStart('thread-alpha');const result=await sending;
   assert.deepEqual(await service.send(identity,'alpha','thread-alpha',payload),result);
   assert.equal(peer.requests.filter(r=>r.method==='turn/start').length,1);
+});
+
+test('confirmed full access is available to a regular authorized user without granting administrator status',{timeout:5000},async t=>{
+ const {service,peer,identity}=await fixture();t.after(()=>service.disconnect());const sending=service.send(identity,'alpha','thread-alpha',{text:'Confirmed task',requestId:'regular-full-confirmed',access:'full',confirmFullAccess:true});await Promise.race([peer.waitForTurnStarts(1),sending]);assert.equal(peer.turnStarts[0].params.sandboxPolicy.type,'dangerFullAccess');assert.equal(identity.elevated,false);peer.resolveTurnStart('thread-alpha');await sending;
 });

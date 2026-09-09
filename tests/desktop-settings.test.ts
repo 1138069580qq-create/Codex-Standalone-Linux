@@ -22,7 +22,7 @@ test('desktop settings prefer authoritative task settings and never expose priva
 test('default desktop send inherits; stale model/effort/permission form fields are not forwarded',()=>{
   assert.deepEqual(desktopOverrides(state(),{model:'wrong',effort:'low',access:'default'},[],admin,'.'),{});
   assert.throws(()=>desktopOverrides(state(),{settingsOverrides:['provider']},[],admin,'.'),/无效的任务设置/);
-  assert.throws(()=>desktopOverrides(state(),{},[],{uuid:'viewer',elevated:false},'.'),/显式选择/);
+  assert.deepEqual(desktopOverrides(state(),{},[],{uuid:'viewer',elevated:false},'.'),{});
 });
 test('only explicit model changes are forwarded and available efforts are checked',()=>{
   const overrides=desktopOverrides(state(),{model:'next',effort:'low',settingsOverrides:['model','effort']},[model('next')],admin,'.');
