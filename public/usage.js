@@ -1,13 +1,13 @@
 'use strict';
 (() => {
-  const U={account:null,summary:null,details:null,tab:'requests',loading:null,timer:null,last:0,sequence:0,before:null,rows:[],detailSequence:0,recordSequence:0,interval:5};
+  const U={account:null,summary:null,details:null,tab:'requests',loading:null,timer:null,last:0,sequence:0,before:null,rows:[],detailSequence:0,recordSequence:0,memberSequence:0,interval:5};
   const number=v=>Number.isFinite(v)?new Intl.NumberFormat('zh-CN',{maximumFractionDigits:0}).format(v):'—';
   const compact=v=>!Number.isFinite(v)?'—':v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(v<10000?1:0)+'K':String(Math.round(v));
   const money=v=>Number.isFinite(v)?'$'+v.toFixed(4):'未定价';
   const duration=v=>!Number.isFinite(v)?'—':v<1000?Math.round(v)+'ms':v<60000?(v/1000).toFixed(1)+'s':Math.floor(v/60000)+'m'+Math.round(v%60000/1000)+'s';
   const cost=s=>s.unpriced?(s.cost>0?money(s.cost)+' + 未定价':'未定价'):money(s.cost);
   const error=message=>{if(message){const layer=messageLayer();layerMessage(message,true,layer?.id==='usage-record-dialog'?layer:$('usage-dialog'));}else{for(const id of ['usage-dialog','usage-record-dialog']){const node=$(id).querySelector('[data-layer-message]');if(node){node.hidden=true;node.textContent='';}}}$('usage-error').hidden=true;};
-  function reset(){++U.sequence;++U.detailSequence;++U.recordSequence;clearTimeout(U.timer);U.timer=null;U.summary=null;U.details=null;U.loading=null;U.account=null;U.last=0;U.rows=[];$('quota-content').textContent='尚未读取';$('run-metrics').hidden=true;for(const id of ['usage-dialog','usage-record-dialog'])if($(id).open)$(id).close();for(const id of ['usage-hero','usage-table','usage-chart','usage-estimates','quota-detail-content','usage-record-content','usage-subscription'])$(id).replaceChildren();$('usage-prices').value='';}
+  function reset(){++U.sequence;++U.detailSequence;++U.recordSequence;++U.memberSequence;U.tab='requests';clearTimeout(U.timer);U.timer=null;U.summary=null;U.details=null;U.loading=null;U.account=null;U.last=0;U.rows=[];$('quota-content').textContent='尚未读取';$('run-metrics').hidden=true;for(const id of ['usage-dialog','usage-record-dialog'])if($(id).open)$(id).close();for(const id of ['usage-hero','usage-table','usage-chart','usage-estimates','quota-detail-content','usage-record-content','usage-subscription','usage-members'])$(id).replaceChildren();$('usage-prices').value='';}
   function schedule(){clearTimeout(U.timer);if(!S.user||document.hidden)return;const delay=Math.max(1000,U.interval*60000-(Date.now()-U.last));U.timer=setTimeout(()=>load().catch(()=>{}),delay);}
   async function load(force=false){
     if(!S.user)return;const account=S.user.id;if(U.account!==account){reset();U.account=account;try{U.interval=localStorage.getItem('codex-usage-refresh')==='30'?30:5;}catch{}$('usage-interval').value=String(U.interval);}
@@ -26,7 +26,7 @@
     if(!visible.length)node.append(metric('周额度剩余','未获取周额度'));
     for(const window of visible){const remaining=Math.max(0,100-window.usedPercent),box=metric('周额度剩余'+(visible.length>1?' · '+(window.bucketId||window.name||'Codex'):''),remaining.toFixed(1)+'%','共享 Codex 账户当前周窗口，不是单个网页账户的额度。');const bar=el('progress');bar.max=100;bar.value=remaining;bar.setAttribute('aria-label','周额度剩余');box.append(bar,el('p',window.resetsAt?shortDate(window.resetsAt)+' 重置':'未提供重置时间','footnote'));node.append(box);}
     node.append(metric('累计折算额度',cost(s.total),'按记录时的 API 单价折算，不是订阅实际账单。'));
-    const p=s.subscriptionPercent,box=metric('订阅周期已用',Number.isFinite(p)?p.toFixed(2)+'%':'待估算','本账户累计周额度百分比 ÷ 5；由同一统计区间的费用占比推算。');
+    const p=s.cycle.configured&&Number.isFinite(s.weeklyPercent)?s.weeklyPercent/5:null,box=metric('本账户占周期总额度',Number.isFinite(p)?p.toFixed(2)+'%':'待估算','总周期固定为 5 个周额度（100%）；本账户累计已用周额度百分比 ÷ 5。每个采样区间按美元费用占比分摊实际减少的周额度，再累加（估算）。');
     const bar=el('progress');bar.max=100;bar.value=Number.isFinite(p)?Math.min(100,p):0;bar.setAttribute('aria-label','订阅周期已用百分比');box.append(bar);node.append(box);
     const button=el('button','使用统计 ›','small wide');button.id='open-usage';button.onclick=action(open);node.append(button);
     node.append(el('p',s.total.unpriced?'有模型未定价':s.cycle.configured?'每周期 5 个周额度':cycleMessage(s.cycle),'footnote'));
@@ -38,7 +38,7 @@
     for(const value of values)row.append(el('span',value));
     row.title='启用统计后观察到的轮数与非重复用量事件。LLM 为轮次耗时扣除工具占用时间，首 token 为本轮首个可见输出延迟；网络、等待审批会影响观测值。缓存创建数据不可用时不补零。';
   }
-  async function open(){error('');$('usage-settings-tab').hidden=!S.user?.admin;$('usage-dialog').showModal();await Promise.all([load(),loadDetails()]);}
+  async function open(){error('');$('usage-settings-tab').hidden=!S.user?.admin;$('usage-members-tab').hidden=!S.user?.admin;$('usage-dialog').showModal();await Promise.all([load(),loadDetails()]);}
   async function loadDetails(more=false){
     const sequence=++U.detailSequence,account=S.user?.id;error('');
     const query=new URLSearchParams({range:$('usage-range').value,offset:String(-new Date().getTimezoneOffset())});
@@ -70,13 +70,42 @@
     host.append(svg);const legend=el('div',undefined,'usage-legend');for(const [key,label]of series)legend.append(el('span',label,'series-'+key));host.append(legend);
   }
   async function selectTab(tab,fetchSettings=true){
+    if((tab==='members'||tab==='settings')&&!S.user?.admin)tab='requests';
     U.tab=tab;for(const button of document.querySelectorAll('[data-usage-tab]')){const active=button.dataset.usageTab===tab;button.classList.toggle('active',active);button.setAttribute('aria-selected',String(active));}
-    $('usage-quota').hidden=tab!=='quota';$('usage-settings').hidden=tab!=='settings';$('usage-table').hidden=tab==='quota'||tab==='settings';$('usage-more').hidden=tab!=='requests'||!U.before;
+    $('usage-quota').hidden=tab!=='quota';$('usage-settings').hidden=tab!=='settings';$('usage-table').hidden=tab==='quota'||tab==='settings'||tab==='members';$('usage-more').hidden=tab!=='requests'||!U.before;
+    $('usage-members').hidden=tab!=='members';$('usage-hero').hidden=tab==='members';$('usage-chart').hidden=tab==='members';
+    for(const id of ['usage-range','usage-model','usage-provider'])$(id).disabled=tab==='members';
+    if(tab==='members'){await loadMembers();return;}
     if(tab==='quota'){renderEstimates();if(U.summary?.limits)renderQuota(U.summary.limits);else $('quota-detail-content').textContent='Codex 尚未返回额度窗口。';return;}
     if(tab==='settings'){if(!S.user?.admin)return;if(fetchSettings||!$('usage-prices').value){const settings=await api('/api/codex/account/usage/settings');$('usage-prices').value=JSON.stringify(settings.prices,null,2);renderSubscription(settings.cycle);}return;}
     renderTable();
   }
-  function renderEstimates(){const node=$('usage-estimates');node.replaceChildren();const s=U.summary;if(!s)return;const grid=el('div',undefined,'usage-grid');grid.append(metric('本周期折算用量',cost(s.cycleUsage)),metric('一周总额度（估算）',Number.isFinite(s.weekUsd)?money(s.weekUsd):'待估算'),metric('周期总额度（5 周）',Number.isFinite(s.cycleUsd)?money(s.cycleUsd):'待估算'),metric('本账户累计周用量',Number.isFinite(s.weeklyPercent)?s.weeklyPercent.toFixed(2)+'%':'待估算'));node.append(grid);node.append(el('p','本账户订阅比例 = 本账户累计周用量 ÷ 5。周美元额度 = 同期已定价费用合计 ÷ 同期已消耗周额度比例。','footnote'));if(!s.pricingComplete)node.append(el('p','存在未定价用量，暂不推算订阅额度。','error'));if(s.quotaGap)node.append(el('p','检测到周窗口或重置卡变化，未观测的区间不补算。','footnote'));node.append(el('p',s.cycle.configured?'套餐周期：'+date(s.cycle.start)+' — '+date(s.cycle.end):cycleMessage(s.cycle),'footnote'));if(s.limits)node.append(el('p','额度采样：'+date(s.limits.fetchedAt),'footnote'));}
+  async function loadMembers(){
+    if(!S.user?.admin)return;
+    const sequence=++U.memberSequence,account=S.user.id,node=$('usage-members');
+    node.replaceChildren(el('p','正在读取成员用量…','muted'));
+    try{
+      const data=await api('/api/codex/account/usage/members');
+      if(sequence!==U.memberSequence||account!==S.user?.id||!S.user?.admin||U.tab!=='members')return;
+      renderMembers(data);
+    }catch(e){if(sequence===U.memberSequence&&account===S.user?.id&&S.user?.admin&&U.tab==='members'){node.replaceChildren(el('p','成员用量读取失败，请点击刷新重试。','muted'));error(e.message);}}
+  }
+  function renderMembers(data){
+    const node=$('usage-members');node.replaceChildren();
+    node.append(el('p',data.cycle.configured?'当前套餐周期：'+date(data.cycle.start)+' — '+date(data.cycle.end):cycleMessage(data.cycle),'footnote'));
+    node.append(metric('总周期额度','100%（固定 5 个周额度）'));
+    const wrap=el('div',undefined,'usage-table-wrap'),table=el('table'),head=el('thead'),titles=el('tr');
+    for(const title of ['成员','已用美元（估算）','已用周额度（累计）','占总周期额度'])titles.append(el('th',title));head.append(titles);table.append(head);
+    const body=el('tbody');
+    const row=(name,value)=>{const tr=el('tr');tr.append(el('th',name),el('td',cost(value.cycleUsage)),el('td',Number.isFinite(value.weeklyPercent)?value.weeklyPercent.toFixed(2)+'%':'待获取'),el('td',Number.isFinite(value.subscriptionPercent)?value.subscriptionPercent.toFixed(2)+'%':'待获取'));return tr;};
+    for(const member of data.members)body.append(row(member.username,member));table.append(body);
+    const footer=el('tfoot');footer.append(row('合计（全部成员，含管理员）',data.total));table.append(footer);wrap.append(table);node.append(wrap);
+    node.append(el('p','总周期固定为 5 个周额度。成员占周期百分比 = 累计已用周额度百分比 ÷ 5；用满一个周额度即 20%。每个采样区间：成员周用量 = 该区间实际消耗的周额度 × 成员美元消耗 ÷ 全员美元消耗，再累加。共享账户没有逐成员读数，分摊为估算；未观测区间不补算。','footnote'));
+    if(!data.pricingComplete)node.append(el('p','存在未定价用量，额度百分比暂不估算。','footnote'));
+    if(data.quotaGap)node.append(el('p','检测到额度采样缺口，百分比可能不完整。','footnote'));
+    node.append(el('p','统计更新：'+date(data.generatedAt)+' · 与共享额度相同，最多 5 分钟更新一次','footnote'));
+  }
+  function renderEstimates(){const node=$('usage-estimates');node.replaceChildren();const s=U.summary;if(!s)return;const grid=el('div',undefined,'usage-grid');grid.append(metric('本周期折算用量',cost(s.cycleUsage)),metric('一个周额度','100% 周额度'),metric('周期总额度','100%（固定 5 个周额度）'),metric('本账户累计周用量',Number.isFinite(s.weeklyPercent)?s.weeklyPercent.toFixed(2)+'%':'待估算'));node.append(grid);node.append(el('p','本账户占周期比例 = 本账户累计已用周额度百分比 ÷ 5。总周期容量固定为 5 个周额度，不使用美元估算预算作为分母；已消耗美元折算保留。逐采样区间按成员美元费用占比分摊实际消耗的周额度后累加（估算）。','footnote'));if(!s.pricingComplete)node.append(el('p','存在未定价用量，暂不推算订阅额度。','error'));if(s.quotaGap)node.append(el('p','检测到周窗口或重置卡变化，未观测的区间不补算。','footnote'));node.append(el('p',s.cycle.configured?'套餐周期：'+date(s.cycle.start)+' — '+date(s.cycle.end):cycleMessage(s.cycle),'footnote'));if(s.limits)node.append(el('p','额度采样：'+date(s.limits.fetchedAt),'footnote'));}
   function renderTable(){
     const host=$('usage-table');host.replaceChildren();const d=U.details;if(!d)return;
     const table=el('table'),thead=el('thead'),head=el('tr'),request=U.tab==='requests';

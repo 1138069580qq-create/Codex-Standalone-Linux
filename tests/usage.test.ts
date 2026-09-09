@@ -61,3 +61,43 @@ test('verified Codex defaults use Sol list price, separate input/output long-con
 test('minor reset timestamp drift does not count the already-used percentage again',async t=>{
  const {ledger,at,tick}=await fixture(t);const reset=Math.floor(at()/1000)+604800;sample(ledger,at(),20,reset);ledger.bind('a',a,'pa',price.model,'Codex',true);tick(1000);ledger.usage('a',counters(1000000),at());tick(300000);sample(ledger,at(),22,reset+1);const stats=ledger.overview(a);assert.equal(stats.weeklyPercent,2);assert.equal(stats.subscriptionPercent,.4);assert.equal(stats.weekUsd,100);
 });
+
+test('administrator member usage separates every account and totals cycle costs and calibrated percentages',async t=>{
+ const {ledger,at,tick}=await fixture(t);sample(ledger,at(),40);
+ ledger.bind('member-a',a,'private-a',price.model,'Codex',true);ledger.bind('member-b',b,'private-b',price.model,'Codex',true);
+ tick(1000);ledger.usage('member-a',counters(1000000),at());ledger.usage('member-b',counters(3000000),at());tick(300000);sample(ledger,at(),60);
+ const members=[{id:a.uuid,username:'Alice'},{id:b.uuid,username:'Bob'},{id:admin.uuid,username:'Administrator'},{id:'empty',username:'No usage'}];
+ assert.throws(()=>ledger.memberOverview(a,members),{status:403});
+ const result=ledger.memberOverview(admin,members);assert.deepEqual(result.members.map(m=>m.username),members.map(m=>m.username));
+ assert.deepEqual(result.members.map(m=>m.cycleUsage.cost),[2,6,0,0]);assert.deepEqual(result.members.map(m=>m.subscriptionPercent),[1,3,0,0]);
+ assert.equal(result.total.cycleUsage.cost,8);assert.equal(result.total.cycleUsage.input,4000000);assert.equal(result.total.cycleUsage.requests,2);assert.equal(result.total.subscriptionPercent,4);assert.equal(result.weeksPerCycle,5);assert.equal(result.cycleCapacityPercent,100);assert.equal(result.total.weeklyPercent,20);assert.equal("cycleUsd" in result,false);
+ assert.doesNotMatch(JSON.stringify(result),/private-a|private-b|member-a|member-b|password|revision/);
+ assert.equal(ledger.details(b,{range:'all'}).rows.length,1);
+});
+test('member usage preserves unavailable percentages and unpriced costs rather than inventing zero quota',async t=>{
+ const {ledger,at,tick}=await fixture(t),members=[{id:a.uuid,username:'Alice'},{id:'empty',username:'Empty'}];
+ let data=ledger.memberOverview(admin,members);assert.equal(data.total.subscriptionPercent,null);assert.equal(data.members[1].subscriptionPercent,null);
+ sample(ledger,at(),10);ledger.bind('unknown',a,'pa','unpriced-model','Codex',true);tick(1000);ledger.usage('unknown',counters(1000),at());tick(300000);sample(ledger,at(),20);
+ data=ledger.memberOverview(admin,members);assert.equal(data.total.cycleUsage.unpriced,1);assert.equal(data.members[0].cycleUsage.unpriced,1);assert.equal(data.total.subscriptionPercent,null);assert.equal(data.pricingComplete,false);
+});
+test('member cycle totals exclude previous cycles and expired cycles do not show percentages',async t=>{
+ const {ledger,at,tick}=await fixture(t);ledger.bind('a-cycle',a,'pa',price.model,'Codex',true);ledger.usage('a-cycle',counters(1000000),at());tick(86400000);
+ ledger.syncSubscription(normalizeSubscription({account:{type:'chatgpt',planType:'pro',subscription:{currentPeriodStart:at(),currentPeriodEnd:at()+86400000}}},at()));
+ ledger.usage('a-cycle',counters(3000000),at());const members=[{id:a.uuid,username:'Alice'}];let data=ledger.memberOverview(admin,members);assert.equal(data.total.cycleUsage.cost,4);assert.equal(data.total.cycleUsage.input,2000000);
+ tick(86400000+1);data=ledger.memberOverview(admin,members);assert.equal(data.cycle.configured,false);assert.equal(data.total.subscriptionPercent,null);
+});
+
+test('member cycle denominator is fixed at five weekly allowances: one full week is exactly twenty percent',async t=>{
+ const {ledger,at,tick}=await fixture(t);sample(ledger,at(),0);ledger.bind('one-week',a,'pa',price.model,'Codex',true);tick(1000);ledger.usage('one-week',counters(1000000),at());tick(300000);sample(ledger,at(),100);
+ const data=ledger.memberOverview(admin,[{id:a.uuid,username:'Alice'},{id:'empty',username:'Empty'}]);assert.equal(data.members[0].weeklyPercent,100);assert.equal(data.members[0].subscriptionPercent,20);assert.equal(data.members[1].subscriptionPercent,0);assert.equal(data.total.subscriptionPercent,20);assert.equal(data.weeksPerCycle,5);assert.equal(data.cycleCapacityPercent,100);assert.equal('cycleUsd' in data,false);
+});
+
+test('weekly quota is allocated per realtime cost interval and then divided by five for both members and sidebar',async t=>{
+ const {ledger,at,tick}=await fixture(t);sample(ledger,at(),0);ledger.bind('interval-a',a,'pa',price.model,'Codex',true);ledger.bind('interval-b',b,'pb',price.model,'Codex',true);
+ tick(1000);ledger.usage('interval-a',counters(25000000),at());ledger.usage('interval-b',counters(50000000),at());tick(300000);sample(ledger,at(),2);
+ const members=[{id:a.uuid,username:'Alice'},{id:b.uuid,username:'Bob'}];let data=ledger.memberOverview(admin,members);
+ assert.equal(data.members[0].cycleUsage.cost,50);assert.equal(data.members[1].cycleUsage.cost,100);assert.ok(Math.abs(data.members[0].weeklyPercent!-2/3)<1e-10);assert.ok(Math.abs(data.members[1].weeklyPercent!-4/3)<1e-10);assert.ok(Math.abs(ledger.overview(a).subscriptionPercent!-2/15)<1e-10);
+ tick(1000);ledger.usage('interval-a',counters(75000000),at());tick(300000);sample(ledger,at(),3);data=ledger.memberOverview(admin,members);
+ assert.equal(data.members[0].cycleUsage.cost,150);assert.equal(data.total.cycleUsage.cost,250);assert.ok(Math.abs(data.members[0].weeklyPercent!-5/3)<1e-10);assert.ok(Math.abs(data.members[1].weeklyPercent!-4/3)<1e-10);assert.ok(Math.abs(data.total.subscriptionPercent!-.6)<1e-10);
+ assert.ok(Math.abs(ledger.overview(a).subscriptionPercent!-data.members[0].subscriptionPercent!)<1e-10);assert.ok(Math.abs(ledger.overview(b).subscriptionPercent!-data.members[1].subscriptionPercent!)<1e-10);
+});

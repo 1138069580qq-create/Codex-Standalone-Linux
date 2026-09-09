@@ -33,7 +33,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
   let authInFlight = 0; let parsing = 0;
   const token = (ctx: Koa.Context) => ctx.cookies.get(cookieName, { signed: false }) || "";
   const current = (ctx: Koa.Context) => sessions.get(token(ctx), users);
-  const routes = await createCodexRoutes(config, options.origin, ctx => current(ctx)?.identity || null, serviceFactory);
+  const routes = await createCodexRoutes(config, options.origin, ctx => current(ctx)?.identity || null, serviceFactory, () => users.users.map(publicUser));
   function setCookie(ctx: Koa.Context, value: string, maxAge: number) {
     // TLS may terminate at the configured reverse proxy. Origin is startup-validated.
     ctx.cookies.secure = options.secureCookies;

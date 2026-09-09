@@ -137,3 +137,20 @@ test('native composer batch: all requested slash actions except pet, first-messa
   assert.ok(!source.includes("id:'pet'"));S.newTask=true;S.newTaskConfirmed=true;S.selected=[{id:'a'.repeat(32)}];S.project.kind='projectless';S.project.id='projectless';c.controls();assert.equal(elements.attach.disabled,false);assert.equal(elements.access.disabled,false);assert.equal(elements.mode.disabled,false);
   c.api=async(url:string,body:any)=>{calls.push({url,body});return {requestId:body.requestId,projectId:'projectless',status:'unknown'};};await c.sendMessage();assert.equal(calls.length,1);assert.equal(calls[0].body.projectId,'projectless');assert.equal(calls[0].body.extensions[0],'a'.repeat(32));
 });
+
+test('slash menu lists all existing commands without hiding unavailable actions or including pets',()=>{
+ const {c,S,elements}=setup();S.thread=null;S.newTask=true;S.capabilities={taskActions:false,extensions:false,mcp:false,setGoal:false};S.menuOpen=true;S.menuMode='slash';S.menuIndex=0;elements.prompt.value='/';
+ const node=()=>({children:[] as any[],append(...v:any[]){this.children.push(...v);},replaceChildren(){this.children=[];},setAttribute(){}});c.el=node;c.action=(fn:any)=>fn;elements['menu-list']=node();elements.prompt.setAttribute=()=>{};
+ vm.runInNewContext(source.slice(source.indexOf('const commands=['),source.indexOf('async function loadCatalog(')),c);vm.runInNewContext(source.slice(source.indexOf('function renderMenu(){'),source.indexOf('async function chooseMenu(')),c);c.renderMenu();
+ const expected=['upload','references','review','side','fork','compact','feedback','archive','new','pin','rename','plan','code','model','permissions','skills','plugins','mcp','status','goal','diff','stop'];assert.deepEqual(Array.from(S.menuItems,(v:any)=>v.id),expected);
+ assert.equal(S.menuItems.find((v:any)=>v.id==='review').enabled,false);assert.match(S.menuItems.find((v:any)=>v.id==='review').description,/先创建或选择聊天/);assert.equal(S.menuItems.find((v:any)=>v.id==='model').enabled,true);
+ S.thread={id:'current'};S.newTask=false;S.capabilities={taskActions:true,extensions:true,mcp:true,setGoal:true};c.renderMenu();assert.equal(S.menuItems.find((v:any)=>v.id==='review').enabled,true);
+ S.status='running';c.renderMenu();assert.equal(S.menuItems.find((v:any)=>v.id==='compact').enabled,false);assert.equal(S.menuItems.find((v:any)=>v.id==='stop').enabled,true);assert.match(S.menuItems.find((v:any)=>v.id==='compact').description,/任务结束后可用/);
+ elements.prompt.value='/model';c.renderMenu();assert.equal(S.menuItems.length,1);assert.equal(S.menuItems[0].id,'model');
+});
+test('composer context footer resets on no thread and distinguishes zero from unavailable',()=>{
+ const {c,S,elements}=setup();S.thread={id:'thread'};S.tokenUsage={total:900000,last:25000,contextWindow:100000};c.controls();assert.match(elements['context-window'].textContent,/25.0%.*25.0K.*100.0K/);assert.match(elements['context-window'].title,/75,000/);assert.equal(elements['context-window'].disabled,false);
+ S.tokenUsage={last:0,contextWindow:100000};c.controls();assert.match(elements['context-window'].textContent,/0.0%/);S.tokenUsage={last:100};c.controls();assert.match(elements['context-window'].textContent,/未提供/);
+ S.thread=null;c.controls();assert.match(elements['context-window'].textContent,/待获取/);assert.equal(elements['context-window'].disabled,true);assert.doesNotMatch(elements['context-window'].textContent,/25.0K/);
+ assert.ok(source.includes("$('context-window').onclick=action(showStatus)"));
+});

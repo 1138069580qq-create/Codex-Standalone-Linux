@@ -43,7 +43,7 @@ export class UsageLedger {
   private cache=new Map<string,{at:number;value:any}>();
   private activeTools=new Map<string,Set<string>>();
   private closed=false;
-  private sharedEstimate?:{at:number;cycleKey:string;all:any;quota:any;from:number;to:number};
+  private sharedEstimate?:{at:number;cycleKey:string;all:any;quota:any;from:number;to:number;shares:Map<string,number>;allocated:number};
   readonly startedAt:number;
   constructor(readonly file:string,private clock=Date.now){
     mkdirSync(path.dirname(file),{recursive:true,mode:0o700});this.db=new DatabaseSync(file);
@@ -174,6 +174,17 @@ export class UsageLedger {
     add(this.sum(who+'at>=? AND at<?',[...args,start,first],'requests'));
     add(this.sum(who+'at>=? AND at<=?',[...args,last,end],'requests'));return result;
   }
+  private intervalShares(from:number,to:number){
+    // Attribute each observed quota delta using ONLY dollars spent in that interval.
+    // Summing interval shares prevents later spending from reallocating earlier quota.
+    const rows=this.db.prepare(
+      'WITH intervals AS (SELECT at,delta,LAG(at) OVER (ORDER BY at) previous FROM quota WHERE at>=? AND at<=?),'+
+      'costs AS (SELECT q.at,q.delta,r.user_id,SUM(COALESCE(r.cost,0)) cost,SUM(CASE WHEN r.cost IS NULL THEN 1 ELSE 0 END) unpriced FROM intervals q JOIN requests r ON r.at>q.previous AND r.at<=q.at GROUP BY q.at,r.user_id),'+
+      'weighted AS (SELECT *,SUM(cost) OVER (PARTITION BY at) total_cost,SUM(unpriced) OVER (PARTITION BY at) total_unpriced FROM costs) '+
+      'SELECT user_id,SUM(CASE WHEN total_cost>0 AND total_unpriced=0 THEN delta*cost/total_cost ELSE 0 END) weekly FROM weighted GROUP BY user_id'
+    ).all(from,to) as {user_id:string;weekly:number}[];
+    const shares=new Map(rows.map(row=>[row.user_id,row.weekly]));return {shares,allocated:rows.reduce((sum,row)=>sum+row.weekly,0)};
+  }
   overview(who:Identity){
     const now=this.clock(),cached=this.cache.get(who.uuid);if(cached&&now-cached.at<300000)return cached.value;
     const storedCycle=this.getMeta('cycle'),cycle={...storedCycle,configured:storedCycle.configured&&storedCycle.end>now,status:storedCycle.status==='active'&&storedCycle.end<=now?'expired':storedCycle.status},start=Math.max(cycle.start,this.getMeta('subscriptionAccountSince')||0),end=Math.min(cycle.end===null?now:cycle.end-1,now),self=this.period(who.uuid,start,end),cycleKey=JSON.stringify(cycle);
@@ -181,13 +192,35 @@ export class UsageLedger {
       const bounds=this.db.prepare('SELECT MIN(at) first,MAX(at) last FROM quota WHERE at>=? AND at<=?').get(start,end) as any;
       const from=bounds.first??end,to=bounds.last??end;
       const quota=this.db.prepare('SELECT COALESCE(SUM(delta),0) consumed,COALESCE(SUM(gap),0) gaps FROM quota WHERE at>? AND at<=?').get(from,to) as any;
-      this.sharedEstimate={at:now,cycleKey,all:this.period(null,from,to),quota,from,to};
+      this.sharedEstimate={at:now,cycleKey,all:this.period(null,from,to),quota,from,to,...this.intervalShares(from,to)};
     }
-    const {all,quota,from,to}=this.sharedEstimate,attributed=this.period(who.uuid,from,to);
+    const {all,quota,from,to,shares,allocated}=this.sharedEstimate;
     const usable=all.cost>0&&!all.unpriced&&quota.consumed>0&&!this.getMeta('quotaUnavailable');
-    const weekUsd=usable?all.cost/(quota.consumed/100):null,weekPercent=usable?attributed.cost/all.cost*quota.consumed:null;
-    const value={generatedAt:now,startedAt:this.startedAt,cycle,cycleUsage:self,total:this.sum('user_id=?',[who.uuid]),weekUsd,cycleUsd:weekUsd===null?null:weekUsd*5,weeklyPercent:weekPercent,subscriptionPercent:weekPercent===null||!cycle.configured?null:weekPercent/5,weeksPerCycle:5,estimate:true,quotaGap:Boolean(quota.gaps),quotaUnavailable:this.getMeta('quotaUnavailable'),limits:this.getMeta('limits'),pricingComplete:all.unpriced===0,calibration:{from,to},refreshSeconds:300};
+    const weekUsd=usable?all.cost/(quota.consumed/100):null,weekPercent=usable?(shares.get(who.uuid)||0):null;
+    const value={generatedAt:now,startedAt:this.startedAt,cycle,cycleUsage:self,total:this.sum('user_id=?',[who.uuid]),weekUsd,cycleUsd:weekUsd===null?null:weekUsd*5,weeklyPercent:weekPercent,subscriptionPercent:weekPercent===null||!cycle.configured?null:weekPercent/5,weeksPerCycle:5,estimate:true,quotaGap:Boolean(quota.gaps)||quota.consumed>allocated+1e-9,quotaUnavailable:this.getMeta('quotaUnavailable'),limits:this.getMeta('limits'),pricingComplete:all.unpriced===0,calibration:{from,to},refreshSeconds:300};
     this.cache.set(who.uuid,{at:now,value});return value;
+  }
+  memberOverview(who:Identity,members:readonly {id:string;username:string}[]){
+    requireAdmin(who);
+    // Reuse one shared calibration snapshot for every member; expose aggregates only.
+    const snapshot=this.overview(who),{cycle,calibration}=snapshot;
+    const start=Math.max(cycle.start,this.getMeta('subscriptionAccountSince')||0),end=Math.min(cycle.end===null?snapshot.generatedAt:cycle.end-1,snapshot.generatedAt);
+    const all=this.period(null,calibration.from,calibration.to);
+    const observed=this.db.prepare('SELECT COALESCE(SUM(delta),0) consumed FROM quota WHERE at>? AND at<=?').get(calibration.from,calibration.to) as {consumed:number};
+    const usable=cycle.configured&&all.cost>0&&!all.unpriced&&observed.consumed>0&&!snapshot.quotaUnavailable;
+    // The denominator is always FIVE weekly allowances, never an estimated dollar budget.
+    // Shared-account weekly consumption is apportioned by observed, priced member usage.
+    const weeksPerCycle=5;
+    const allocations=this.sharedEstimate&&this.sharedEstimate.from===calibration.from&&this.sharedEstimate.to===calibration.to?this.sharedEstimate:this.intervalShares(calibration.from,calibration.to);
+    const rows=members.map(member=>{
+      const cycleUsage=this.period(member.id,start,end);
+      const weeklyPercent=usable?(allocations.shares.get(member.id)||0):null;
+      return {id:member.id,username:member.username,cycleUsage,weeklyPercent,subscriptionPercent:weeklyPercent===null?null:weeklyPercent/weeksPerCycle};
+    });
+    const total={cycleUsage:empty(),weeklyPercent:usable?0:null as number|null,subscriptionPercent:usable?0:null as number|null};
+    for(const row of rows){for(const key of Object.keys(total.cycleUsage) as (keyof typeof total.cycleUsage)[])total.cycleUsage[key]+=row.cycleUsage[key];if(total.weeklyPercent!==null)total.weeklyPercent+=row.weeklyPercent!;}
+    if(total.weeklyPercent!==null)total.subscriptionPercent=total.weeklyPercent/weeksPerCycle;
+    return {generatedAt:snapshot.generatedAt,cycle,calibration,weeksPerCycle,cycleCapacityPercent:100,estimate:true,pricingComplete:all.unpriced===0,quotaGap:snapshot.quotaGap,members:rows,total};
   }
   details(who:Identity,input:{range?:string;model?:string;provider?:string;before?:number;offsetMinutes?:number}={}){
     const now=this.clock(),offset=Math.max(-840,Math.min(840,input.offsetMinutes||0))*60000;

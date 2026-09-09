@@ -33,7 +33,7 @@ import { readCatalog, publicCatalog, resolveExtensions, accessPolicy, readMcp, t
 
 interface Session {
   root?:string;
-  tokenUsage?: { total: number; last: number; contextWindow?: number };
+  tokenUsage?: { total: number|null; last: number|null; contextWindow?: number };
   id: string;
   projectId: string;
   title: string;
@@ -845,7 +845,7 @@ export class CodexConsoleService {
     if (!session) return;
     session.touched = Date.now();
     if (method === "thread/tokenUsage/updated") {
-      const n=(v:any)=>Number.isFinite(v)&&v>=0?Math.floor(v):0;
+      const n=(v:any)=>Number.isSafeInteger(v)&&v>=0?v:null;
       session.tokenUsage={total:n(p.tokenUsage?.total?.totalTokens),last:n(p.tokenUsage?.last?.totalTokens),contextWindow:n(p.tokenUsage?.modelContextWindow)||undefined};
       this.hub.publish({type:"status",projectId:session.projectId,threadId:id,payload:{status:session.status,tokenUsage:session.tokenUsage,metrics:this.usageSnapshot(id)}});
       return;

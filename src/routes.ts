@@ -12,7 +12,7 @@ import { listProjectFiles, openProjectDownload, uploadProjectFile, projectDiff }
 export type ServiceFactory = (config: ConfigStore, receipts: CommandReceipts) => CodexConsoleService;
 
 export async function createCodexRoutes(config: ConfigStore, publicOrigin: string,
-  sessionIdentity: (ctx: Koa.Context) => Identity | null, factory?: ServiceFactory) {
+  sessionIdentity: (ctx: Koa.Context) => Identity | null, factory?: ServiceFactory, listMembers: () => readonly {id:string;username:string}[] = () => []) {
   const receipts = new CommandReceipts(path.join(path.dirname(config.file), "receipts.json"));
   await receipts.load();
   const service = factory ? factory(config, receipts) : new CodexConsoleService(config, receipts);
@@ -211,6 +211,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
     })
   );
   router.get("/account/usage",wrap(async(_c,who)=>{await sampleQuota(who);return usage.overview(who);}));
+  router.get("/account/usage/members",wrap(async(_c,who)=>{requireAdmin(who);rateLimit(who,"usage-members",12);await sampleQuota(who);return usage.memberOverview(who,listMembers());}));
   router.get("/account/usage/details",wrap((c,who)=>{rateLimit(who,"usage-details",12);const range=param(c,"range",8)||"today",before=Number(param(c,"before",20))||undefined,offsetMinutes=Number(param(c,"offset",6))||0;if(!["today","7d","30d","all"].includes(range)||before!==undefined&&(!Number.isSafeInteger(before)||before<1)||!Number.isInteger(offsetMinutes)||Math.abs(offsetMinutes)>840)throw new ConsoleError(400,"INVALID_USAGE_FILTER","统计筛选条件无效。");return usage.details(who,{range,before,offsetMinutes,model:param(c,"model",128)||undefined,provider:param(c,"provider",128)||undefined});}));
   router.get("/account/usage/records/:id",wrap((c,who)=>{const id=Number(c.params.id);if(!Number.isSafeInteger(id)||id<1)throw new ConsoleError(400,"INVALID_USAGE_ID","无效的记录 ID。");return usage.detail(who,id);}));
   router.get("/account/usage/settings",wrap((_c,who)=>usage.settings(who)));

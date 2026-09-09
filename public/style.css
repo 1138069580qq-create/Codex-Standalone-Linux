@@ -23,3 +23,8 @@
 .usage-dialog>.dialog-header{position:sticky;top:-26px;z-index:2;background:var(--panel);margin:-26px -26px 20px;padding:20px 26px;border-bottom:1px solid var(--line)}.usage-metric progress{width:100%;accent-color:var(--accent)}@media(max-width:720px){.usage-dialog>.dialog-header{top:-16px;margin:-16px -16px 16px;padding:16px}}
 
 .auth-tabs{display:flex;gap:8px;margin-bottom:18px}.auth-tabs button{flex:1}.auth-tabs .active{background:var(--accent,#b4e9d5);color:#10251e}.layer-message{padding:12px;border-radius:8px;background:var(--panel,#171f23);border:1px solid currentColor;overflow-wrap:anywhere}.quota-window+.usage-metric{margin-top:16px}
+
+/* Keep context usage at the composer bottom-right, including narrow screens. */
+.composer-footer{flex-wrap:wrap;justify-content:flex-start}.composer-footer #stream-state{min-width:0;overflow-wrap:anywhere}.composer-footer .context-window{margin-left:auto;padding:3px 5px;border:0;background:transparent;color:var(--muted);font-size:10px;white-space:nowrap;max-width:100%}.composer-footer .context-window:disabled{opacity:1}.composer-footer .context-warning{color:#ffc374}.usage-table-wrap tfoot{font-weight:600;border-top:1px solid var(--line)}.usage-table-wrap th{overflow-wrap:anywhere}
+
+#usage-members table{width:100%;min-width:0;table-layout:fixed}#usage-members th,#usage-members td{white-space:normal;overflow-wrap:anywhere;padding:10px 8px}#usage-members th:first-child{width:26%;text-align:left}#usage-dialog :has(> #usage-chart[hidden]){display:none}

@@ -65,7 +65,22 @@ function commandAvailable(command) {
   const capability={new:'createThread',skills:'extensions',plugins:'extensions',mcp:'mcp',goal:'setGoal'}[command.id];
   return (!capability || supports(capability)) && (!command.files || permission('files'));
 }
+function commandDisabledReason(command){
+  if(['review','side','fork','compact','feedback','archive','pin','rename'].includes(command.id)&&!S.thread)return '先创建或选择聊天';
+  if(!commandAvailable(command))return S.newTask?'创建聊天后可用':'当前连接或权限不支持';
+  if(command.id==='stop'&&S.status!=='running')return '当前没有运行中的任务';
+  if(['review','compact','fork','side','archive'].includes(command.id)&&S.status==='running')return '任务结束后可用';
+  return '';
+}
+function renderContextWindow(){
+  const node=$('context-window'),info=CodexState.contextWindow(S.thread?S.tokenUsage:null);
+  const count=v=>new Intl.NumberFormat('zh-CN').format(v),short=v=>v>=1e6?(v/1e6).toFixed(1)+'M':v>=1000?(v/1000).toFixed(1)+'K':String(v);
+  node.textContent=info.percent!==null?'上下文 '+info.percent.toFixed(1)+'% · '+short(info.used)+' / '+short(info.capacity):info.used!==null?'上下文 '+short(info.used)+' / 未提供':info.capacity!==null?'上下文 — / '+short(info.capacity):'上下文：待获取';
+  node.title=info.percent!==null?'上下文已用 '+count(info.used)+' / '+count(info.capacity)+' tokens（'+info.percent.toFixed(1)+'%），剩余 '+count(info.remaining)+' tokens。按 Codex 最近一次用量计算，不是累计账单；点击查看状态。':S.thread?'等待 Codex 提供完整上下文数据，不推测窗口大小。点击查看状态。':'创建或选择聊天后显示上下文窗口信息。';
+  node.className='context-window'+(info.percent!==null&&info.percent>=85?' context-warning':'');node.disabled=!S.thread;
+}
 function controls() {
+  renderContextWindow();
   const ready=!!S.project && S.connected && permission('send');
   $('send').disabled=!ready || S.status==='running' || S.sending || !!S.taskCreation;
   $('check-creation').hidden=!S.taskCreation; $('check-creation').disabled=S.sending||S.checkingCreation;
@@ -470,6 +485,7 @@ $('check-creation').onclick=action(()=>checkCreation());
 $('cancel-new-thread').onclick=()=>$('new-thread-dialog').close();
 $('new-thread-form').onsubmit=action(async()=>{if(!supports('createThread'))throw new Error('此连接不支持新建任务。');const title=$('new-thread-title').value;const epoch=S.epoch;const submit=document.querySelector('#new-thread-form button[type=submit]');if(submit.disabled)return;submit.disabled=true;try{const thread=await api('/api/codex/threads',{projectId:S.project.id,title});$('new-thread-dialog').close();if(epoch===S.epoch){S.threads.unshift(thread);await selectThread(thread);}}finally{submit.disabled=false;}});
 $('composer').onsubmit=action(sendMessage);$('prompt').onkeydown=promptKey;
+$('context-window').onclick=action(showStatus);
 $('prompt').oninput=()=>{S.menuIndex=0;if(/^\/[^\n]*$/.test($('prompt').value)){openMenu('slash').catch(e=>toast(e.message,true));}else if(S.menuMode==='slash')closeMenu();};
 $('model').onchange=()=>{loadEfforts();if(S.newTask&&!$('model').value){delete S.settingsOverrides.model;delete S.settingsOverrides.effort;renderSettingsSource();}else markSettings('model','effort');};$('effort').onchange=()=>markSettings('effort');$('mode').onchange=()=>markSettings('mode');$('follow-desktop').onclick=()=>{if(S.sending)return;S.settingsOverrides={};renderThreadSettings();};$('stop').onclick=action(async()=>{await api(`/api/codex/threads/${encodeURIComponent(S.thread.id)}/interrupt`,{projectId:S.project.id});});
 $('attach').onclick=action(()=>S.menuOpen?closeMenu():openMenu('plus'));$('upload').onchange=action(uploadFile);
@@ -542,7 +558,8 @@ function renderMenu(){
   const query=(S.menuMode==='slash'?$('prompt').value.replace(/^\//,''):$('menu-query').value).trim().toLowerCase();
   const entries=(supports('extensions')&&S.catalogProject===S.project?.id?S.catalog?.entries:[])||[];
   const common=S.menuMode==='plus'?['upload','references','goal','plan']:['mcp','review','side','fork','compact','feedback','archive','new','status','goal','pin','plan','rename','permissions'];
-  const basic=['plus','slash'].includes(S.menuMode)?commands.filter(c=>(query||common.includes(c.id))&&commandAvailable(c)).map(c=>({...c,kind:'command',enabled:c.id==='stop'?S.status==='running':!(['review','compact','fork','side','archive'].includes(c.id)&&S.status==='running')})):[];
+  // Slash always lists the complete command set. Unsupported actions stay visible with a reason.
+  const basic=['plus','slash'].includes(S.menuMode)?commands.filter(c=>S.menuMode==='slash'||(query||common.includes(c.id))&&commandAvailable(c)).map(c=>{const reason=commandDisabledReason(c);return {...c,kind:'command',enabled:!reason,description:reason?c.description+' · '+reason:c.description};}):[];
   const filtered=entries.filter(e=>S.menuMode!=='skills'&&S.menuMode!=='plugins'||e.kind===(S.menuMode==='skills'?'skill':'plugin'));
   const ordered=S.menuMode==='plus'?[...filtered.filter(e=>e.kind==='plugin'),...filtered.filter(e=>e.kind==='skill')]:filtered;
   const all=[...basic,...ordered];
@@ -563,7 +580,7 @@ function renderMenu(){
 }
 async function chooseMenu(index){
   const item=S.menuItems[index];if(!item?.enabled)return;
-  if(item.kind==='command'&&!commandAvailable(item))return;
+  if(item.kind==='command'&&commandDisabledReason(item))return;
   if(item.kind!=='command'&&!supports('extensions'))return;
   const slash=S.menuMode==='slash';if(slash)$('prompt').value='';
   closeMenu();
@@ -621,7 +638,7 @@ async function showMcp(){const root=showInfo('MCP');root.append(el('p','读取�
 async function showStatus(){
   if(S.thread)await syncSnapshot();const root=showInfo('状态');
   const rows=[['类型',S.project?.kind==='projectless'?'无项目对话':'项目对话'],['项目',S.project?.name||'未选择'],['任务 ID',S.thread?.id||'尚未创建'],['状态',stateName(S.status)],['模型',$('model').value],['权限',$('access').selectedOptions[0].textContent]];
-  const usage=S.tokenUsage;if(usage){rows.push(['累计 tokens',String(usage.total)],['最近一轮 tokens',String(usage.last)]);if(usage.contextWindow)rows.push(['上下文窗口',String(usage.contextWindow)]);}else rows.push(['上下文用量','尚未收到 Codex 用量数据']);
+  const usage=S.tokenUsage;if(usage){const context=CodexState.contextWindow(usage);rows.push(['累计 tokens',usage.total===null?'未提供':String(usage.total)],['当前上下文 tokens',context.used===null?'未提供':String(context.used)]);if(context.capacity)rows.push(['上下文窗口',String(context.capacity)]);if(context.percent!==null)rows.push(['上下文占用',context.percent.toFixed(1)+'%'],['上下文剩余 tokens',String(context.remaining)]);}else rows.push(['上下文用量','尚未收到 Codex 用量数据']);
   for(const [label,value] of rows){const row=el('div',undefined,'status-row');row.append(el('span',label,'muted'),el('code',value));root.append(row);}
   try{const limits=await api('/api/codex/account/limits');for(const w of limits.windows||[]){const row=el('div',undefined,'status-row');row.append(el('span',w.windowDurationMins===10080?'一周窗口':w.name||'额度窗口','muted'),el('code',w.usedPercent+'% · '+date(w.resetsAt)+' 重置'));root.append(row);}}catch{root.append(el('p','Codex 未提供当前额度数据','footnote'));}
 }

@@ -49,7 +49,13 @@
     }
     return { events, carry: tail };
   }
-  const api = { applyEvent, parseSse, requestId, windowLabel };
+  function contextWindow(usage) {
+    const valid = v => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
+    const used = valid(usage?.last) ? usage.last : null;
+    const capacity = valid(usage?.contextWindow) && usage.contextWindow > 0 ? usage.contextWindow : null;
+    return { used, capacity, percent: used !== null && capacity !== null ? used / capacity * 100 : null, remaining: used !== null && capacity !== null ? Math.max(0, capacity - used) : null };
+  }
+  const api = { applyEvent, parseSse, requestId, windowLabel, contextWindow };
   if (typeof module !== 'undefined') module.exports = api;
   else scope.CodexState = api;
 })(globalThis);
