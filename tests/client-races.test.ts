@@ -15,11 +15,14 @@ test('reconnect keeps retrying transient session failures, stops after logout or
   state.epoch=1;context.api=async()=>{const e:any=new Error('logout');e.status=401;throw e;};context.scheduleReconnect(1);await queue.shift()!();assert.equal(queue.length,0);
 });
 test('upload cancels before transmission if the project changes while reading the file',async()=>{
-  const upload:any={files:[{name:'file.txt',size:10}],value:'selected'};const state:any={epoch:1,project:{id:'original'},attachments:[]};let sent=0;
-  class FakeFileReader {result='data:text/plain;base64,YQ==';onload?:()=>void;readAsDataURL(){state.epoch++;state.project={id:'other'};this.onload?.();}}
-  const context:any={S:state,$:()=>upload,FileReader:FakeFileReader,api:async()=>{sent++;},renderAttachments:()=>{},toast:()=>{}};
-  const start=source.indexOf('async function uploadFile('),end=source.indexOf('let quotaLoading',start);
-  vm.runInNewContext(source.slice(start,end),context);
+  const state:any={epoch:1,user:{id:'qa'},project:{id:'original'},attachments:[]};let sent=0;
+  const file={name:'file.txt',size:10,arrayBuffer:async()=>{state.epoch++;state.project={id:'other'};return new ArrayBuffer(10);}};
+  const upload:any={files:[file],value:'selected'};
+  const features=readFileSync(path.join(__dirname,'../public/features.js'),'utf8');
+  const context:any={S:state,$:()=>upload,api:async()=>{sent++;},renderAttachments:()=>{},crypto:{subtle:{digest:async()=>new ArrayBuffer(32)}},same:(epoch:number,id:string)=>epoch===state.epoch&&id===state.project.id,Uint8Array,ArrayBuffer};
+  const helperStart=features.indexOf('async function upload('),helperEnd=features.indexOf('async function loadRegistrations(',helperStart);
+  vm.runInNewContext(features.slice(helperStart,helperEnd),context);context.CodexFeatures={upload:context.upload};
+  const start=source.indexOf('async function uploadFile('),end=source.indexOf('let quotaLoading',start);vm.runInNewContext(source.slice(start,end),context);
   await assert.rejects(context.uploadFile(),/项目已切换/);assert.equal(sent,0);assert.equal(upload.value,'');
 });
 

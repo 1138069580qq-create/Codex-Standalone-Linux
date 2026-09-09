@@ -1,0 +1,56 @@
+import type Koa from "koa";
+import type Router from "@koa/router";
+import {ConsoleError,type Identity,type Project} from "./backend/config";
+import {openProjectDownload} from "./backend/files";
+import {projectPreview,ThumbnailCache} from "./backend/previews";
+import {UploadSessions} from "./backend/transfers";
+import {downloadExternal} from "./backend/remote-files";
+import {contentType,isMediaType} from "./backend/mime";
+type Handler=(c:Koa.ParameterizedContext,who:Identity)=>Promise<unknown>|unknown;
+type Access={root:(who:Identity,id:string,capability:"files")=>Promise<string>;wrap:(handler:Handler)=>Koa.Middleware;project:(who:Identity,id:string)=>Project};
+export function installFileRoutes(router:Router, access:Access) {
+  const uploads=new UploadSessions(),images=new ThumbnailCache();let previews=0,downloads=0;
+  const query=(c:Koa.Context,key:string)=>{const v=c.query[key];if(typeof v!=="string"||!v||v.length>4096)throw new ConsoleError(400,"INVALID_PARAMETER","Invalid "+key);return v;};
+  const body=(c:Koa.Context)=>{const b=c.request.body as any;if(!b||typeof b!=="object"||Array.isArray(b))throw new ConsoleError(400,"INVALID_BODY","A JSON object is required.");return b;};
+  router.get("/files/options",access.wrap(async(c,who)=>{const id=query(c,"projectId");await access.root(who,id,"files");return {downloadHosts:access.project(who,id).downloadHosts||[],uploadBytes:4*1024*1024,downloadBytes:512*1024*1024};}));
+  router.get("/files/content",access.wrap(async(c,who)=>{
+    const name=query(c,"path"),root=await access.root(who,query(c,"projectId"),"files");
+    const file=await openProjectDownload(root,name,{range:c.get("range"),ifRange:c.get("if-range"),ifNoneMatch:c.get("if-none-match")});
+    c.set("ETag",file.etag);c.set("Last-Modified",file.modified);c.set("Accept-Ranges","bytes");c.set("Cache-Control","private, no-cache");
+    const type=contentType(name),inline=c.query.inline==="1"&&(type==="application/pdf"||isMediaType(type));
+    c.type=inline?type:"application/octet-stream";
+    if(!inline)c.attachment(file.name);else c.set("Content-Disposition","inline");
+    c.type=inline?type:"application/octet-stream"; // attachment() infers MIME; override after it.
+    // Documents never gain same-origin script authority, even with a forged filename.
+    c.set("Content-Security-Policy","default-src 'none'; sandbox");
+    if(file.status===304){file.stream.destroy();c.status=304;return;}
+    if(file.contentRange)c.set("Content-Range",file.contentRange);
+    if(c.method==="HEAD"){file.stream.destroy();c.body="";}else c.body=file.stream;
+    c.status=file.status;c.length=file.size;
+  }));
+  router.get("/files/preview",access.wrap(async(c,who)=>{
+    const root=await access.root(who,query(c,"projectId"),"files");if(previews>=2)throw new ConsoleError(429,"PREVIEW_BUSY","文件预览繁忙。");
+    previews++;try{return await projectPreview(root,query(c,"path"));}finally{previews--;}
+  }));
+  router.get("/files/image",access.wrap(async(c,who)=>{
+    const file=await images.read(await access.root(who,query(c,"projectId"),"files"),query(c,"path"),c.query.full==="1");
+    c.set("Cache-Control","private, no-cache");c.set("ETag",file.etag);
+    if(c.get("if-none-match").split(",").map(v=>v.trim()).includes(file.etag)){c.status=304;return;}
+    c.type=file.type;c.body=file.data;
+  }));
+  router.post("/uploads",access.wrap(async(c,who)=>{const b=body(c);return uploads.begin(who.uuid,await access.root(who,b.projectId,"files"),b.name,b.size,b.hash);}));
+  router.get("/uploads/:id",access.wrap(async(c,who)=>uploads.status(who.uuid,await access.root(who,query(c,"projectId"),"files"),c.params.id)));
+  router.put("/uploads/:id",access.wrap(async(c,who)=>{
+    const root=await access.root(who,query(c,"projectId"),"files"),data=c.request.body;
+    if(!Buffer.isBuffer(data))throw new ConsoleError(415,"BINARY_REQUIRED","Binary chunk required.");
+    return uploads.append(who.uuid,root,c.params.id,Number(query(c,"offset")),data);
+  }));
+  router.post("/uploads/:id/commit",access.wrap(async(c,who)=>{const b=body(c);return uploads.commit(who.uuid,await access.root(who,b.projectId,"files"),c.params.id);}));
+  router.post("/files/external",access.wrap(async(c,who)=>{
+    const b=body(c),root=await access.root(who,b.projectId,"files");
+    if(typeof b.url!=="string"||typeof b.name!=="string")throw new ConsoleError(400,"INVALID_DOWNLOAD","A URL and filename are required.");
+    if(downloads>=2)throw new ConsoleError(429,"DOWNLOAD_BUSY","外部下载繁忙，请稍后重试。");
+    downloads++;try{return await downloadExternal(root,b.name,b.url,access.project(who,b.projectId).downloadHosts||[]);}finally{downloads--;}
+  }));
+  return {close(){uploads.clear();images.clear();}};
+}

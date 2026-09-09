@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark">
-  <title>Codex</title><link rel="stylesheet" href="/style.css"><script src="/state.js" defer></script><script src="/app.js" defer></script><script src="/queue.js" defer></script><script src="/usage.js" defer></script>
+  <title>Codex</title><link rel="stylesheet" href="/style.css"><script src="/state.js" defer></script><script src="/app.js" defer></script><script src="/features.js" defer></script><script src="/queue.js" defer></script><script src="/usage.js" defer></script>
 </head>
 <body>
 <section id="login-view" class="login-shell">
@@ -11,7 +11,7 @@
     <label>用户名<input id="username" name="username" autocomplete="username" required maxlength="80" autofocus></label>
     <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
     <label id="password-confirm-label" hidden>确认密码<input id="password-confirm" name="password-confirm" type="password" autocomplete="new-password" maxlength="256"></label>
-    <p id="register-note" class="footnote" hidden>注册后可直接登录，无需审批。新账户不是管理员；项目与聊天按网页账户隔离显示，不是系统级文件隔离。密码至少 12 位。</p>
+    <p id="register-note" class="footnote" hidden>提交注册申请后，管理员批准才能登录。新账户不是管理员；项目与聊天按网页账户隔离显示，不是系统级文件隔离。密码至少 12 位。</p>
     <p id="login-error" class="error" role="alert"></p><button id="login-submit" class="primary wide" type="submit">登录</button>
   </form>
 </section>
@@ -62,9 +62,11 @@
     </main>
     <aside id="inspector" class="inspector">
       <div class="section-title">详情 <button id="close-inspector" class="icon compact" aria-label="关闭检查面板">×</button></div>
-      <div class="inspector-tabs" role="tablist"><button class="active" data-panel="quota" role="tab" aria-selected="true">账号额度</button><button data-panel="files" role="tab" aria-selected="false">文件</button><button data-panel="diff" role="tab" aria-selected="false">Diff</button></div>
+      <div class="inspector-tabs" role="tablist"><button class="active" data-panel="quota" role="tab" aria-selected="true">账号额度</button><button data-panel="files" role="tab" aria-selected="false">文件</button><button data-panel="browser" role="tab" aria-selected="false">浏览器</button><button data-panel="diff" role="tab" aria-selected="false">Diff</button></div>
       <section id="panel-quota" class="inspector-panel"><div class="panel-title"><h2>额度</h2><button id="refresh-quota" class="icon" aria-label="刷新额度">↻</button></div><div id="quota-content" class="muted">尚未读取</div></section>
-      <section id="panel-files" class="inspector-panel" hidden><div class="panel-title"><h2>项目文件</h2><button id="files-up" class="icon" aria-label="上级目录">↑</button></div><p id="file-path" class="path">/</p><button id="refresh-files" class="small wide">刷新</button><div id="file-list"></div></section>
+      <section id="panel-files" class="inspector-panel" hidden><div class="panel-title"><h2>项目文件</h2><button id="files-up" class="icon" aria-label="上级目录">↑</button></div><p id="file-path" class="path">/</p><button id="refresh-files" class="small wide">刷新</button><div class="file-tools"><button id="external-open" class="small" type="button">服务器下载外部文件</button><span id="transfer-status" class="footnote" role="status"></span></div><div id="file-list"></div>
+        <section id="file-preview" hidden><div class="panel-title"><h3 id="preview-title"></h3><button id="preview-fullscreen" type="button" class="small">全屏查看</button><button id="preview-close" type="button" class="icon" aria-label="关闭文件预览">×</button></div><div id="preview-body"></div></section></section>
+      <section id="panel-browser" class="inspector-panel" hidden><h2>简易浏览器</h2><form id="browser-form"><label>HTTPS 地址<input id="browser-url" type="url" placeholder="https://example.com" required maxlength="4096"></label><div class="file-tools"><button type="submit" class="small">打开</button><button id="browser-clear" type="button" class="small">关闭网页</button></div></form><p class="footnote">仅在点击打开后加载。隔离网页不能读取本应用；不支持任意网站登录。有些网站禁止嵌入，可在新窗口打开。</p><a id="browser-external" target="_blank" rel="noopener noreferrer" hidden>在新窗口打开</a><div id="browser-surface"></div></section>
       <section id="panel-diff" class="inspector-panel" hidden><div class="panel-title"><h2>Diff</h2><button id="refresh-diff" class="icon" aria-label="刷新差异">↻</button></div><pre id="diff-content" class="diff">点击刷新</pre></section>
     </aside>
   </div>
@@ -95,7 +97,10 @@
     <details><summary class="footnote">授权格式</summary><p class="footnote">root：Linux 已有绝对路径。grants：userId 对应下方账号 ID；权限为 view / send / approve / files，后三者须有 view。项目路径不能重叠。ownerId 指定账户归属；其他账户（包括管理员）不能打开该账户的项目和聊天。仅管理员可管理账户与全局设置。</p></details>
     <div class="dialog-actions"><button id="disconnect" type="button" class="danger">断开</button><button type="submit" class="primary">保存配置</button></div>
   </form><hr>
-  <section><div class="admin-usage-header"><h2>账号与成员用量</h2><button id="admin-usage-refresh" type="button" class="small">刷新用量</button></div><div id="admin-members" hidden></div><div id="users-list"></div><form id="user-form"><input id="edit-user-id" type="hidden"><div class="form-row"><label>用户名<input id="new-username" required maxlength="80"></label><label>密码<input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="256" placeholder="至少 12 位；留空不修改"></label></div><label class="check"><input id="new-admin" type="checkbox">管理员</label><div class="dialog-actions"><button id="cancel-edit-user" class="small" type="button">新建账号</button><button class="primary" type="submit">保存账号</button></div></form></section>
+  <section><div class="admin-usage-header"><h2>账号与成员用量</h2><button id="admin-usage-refresh" type="button" class="small">刷新用量</button></div><div id="admin-members" hidden></div><section class="registration-panel"><div class="panel-title"><h3>待审批注册</h3><button id="registrations-refresh" type="button" class="small">刷新申请</button></div><div id="registration-list"></div></section><div id="users-list"></div><form id="user-form"><input id="edit-user-id" type="hidden"><div class="form-row"><label>用户名<input id="new-username" required maxlength="80"></label><label>密码<input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="256" placeholder="至少 12 位；留空不修改"></label></div><label class="check"><input id="new-admin" type="checkbox">管理员</label><div class="dialog-actions"><button id="cancel-edit-user" class="small" type="button">新建账号</button><button class="primary" type="submit">保存账号</button></div></form></section>
 </dialog>
 <div id="toast" class="toast" role="alert" hidden></div>
+<dialog id="image-dialog" class="preview-dialog"><div class="dialog-header"><h2 id="image-title">图片</h2><div class="file-tools"><button id="image-zoom" type="button" class="small">原始尺寸</button><button id="image-close" type="button" class="icon" aria-label="关闭图片">×</button></div></div><p id="image-state" class="footnote" role="status"></p><div id="image-canvas"><img id="full-image" alt="全图"></div></dialog>
+<dialog id="file-dialog" class="preview-dialog"><div class="dialog-header"><h2 id="file-dialog-title">文件预览</h2><button id="file-dialog-close" type="button" class="icon" aria-label="关闭全屏预览">×</button></div><div id="file-dialog-body"></div></dialog>
+<dialog id="external-dialog"><form id="external-form"><div class="dialog-header"><h2>服务器下载外部文件</h2><button id="external-close" type="button" class="icon" aria-label="关闭外部下载">×</button></div><p class="footnote">服务器直接拉取，最多 4 MiB，不经过本机上传；只允许管理员配置的 HTTPS 域名。不连接 GitHub。</p><p id="external-hosts" class="footnote"></p><label>文件 URL<input id="external-url" type="url" required maxlength="4096"></label><label>保存文件名<input id="external-name" required maxlength="120"></label><button class="primary" type="submit">下载到项目</button></form></dialog>
 </body></html>

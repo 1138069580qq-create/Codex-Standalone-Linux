@@ -41,6 +41,23 @@ export class UserStore {
       this.users = parsed;
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
   }
+  async approveRegistration(id: string, username: string, passwordHash: string) {
+    const update = this.writing.then(async () => {
+      if (!/^[a-f0-9-]{36}$/.test(id) || !/^[a-zA-Z0-9_.@-]{1,80}$/.test(username) ||
+          !/^scrypt\$1\$[a-f0-9]{32}\$[a-f0-9]{128}$/.test(passwordHash)) invalid("Invalid registration record.");
+      const existing = this.users.find(u => u.id === id);
+      if (existing && !existing.admin && existing.username === username && existing.passwordHash === passwordHash) return publicUser(existing);
+      if (existing || this.users.some(u => u.username.toLowerCase() === username.toLowerCase())) invalid("Username already exists.");
+      if (this.users.length >= 100 || !this.users.some(u => u.admin)) invalid("Account capacity or administrator unavailable.");
+      const user: User = { id, username, passwordHash, admin: false, revision: randomUUID() };
+      const next = [...this.users, user];
+      const temp = `${this.file}.${randomUUID()}.tmp`;
+      await fs.writeFile(temp, JSON.stringify(next, null, 2) + "\n", {flag: "wx", mode: 0o600});
+      await fs.rename(temp, this.file); this.users = next;
+      return publicUser(user);
+    });
+    this.writing = update.catch(() => {}); return update;
+  }
   async upsert(input: { id?: string; username: string; password?: string; admin: boolean }) {
     const update = this.writing.then(async () => {
       if (!input || typeof input.username !== "string" || !/^[a-zA-Z0-9_.@-]{1,80}$/.test(input.username) || typeof input.admin !== "boolean")

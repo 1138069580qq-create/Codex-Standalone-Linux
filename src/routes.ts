@@ -1,4 +1,5 @@
 import path from "node:path";
+import { installFileRoutes } from "./file-routes";
 import { PassThrough } from "node:stream";
 import { promises as fs } from "node:fs";
 import type Koa from "koa";
@@ -69,8 +70,8 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
         c.set("Cache-Control", "no-store");
         c.set("X-Content-Type-Options", "nosniff");
         rateLimit(who, "requests", 240);
-        if (c.method !== "GET") {
-          rateLimit(who, "writes", 40);
+        if (!["GET","HEAD"].includes(c.method)) {
+          rateLimit(who, c.method==="PUT"&&c.path.includes("/uploads/")?"chunks":"writes", c.method==="PUT"&&c.path.includes("/uploads/")?240:40);
           const origin = c.get("origin");
           if (origin && origin !== publicOrigin)
             throw new ConsoleError(403, "ORIGIN_DENIED", "Cross-origin writes are not permitted.");
@@ -188,21 +189,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
       listProjectFiles(await root(who, param(c, "projectId", 64), "files"), param(c, "path") || ".")
     )
   );
-  router.get(
-    "/files/content",
-    wrap(async (c, who) => {
-      const download = await openProjectDownload(
-        await root(who, param(c, "projectId", 64), "files"),
-        param(c, "path")
-      );
-      c.type = "application/octet-stream";
-      c.attachment(download.name);
-      c.length = download.size;
-      c.set("Cache-Control", "no-store");
-      c.set("X-Content-Type-Options", "nosniff");
-      c.body = download.stream;
-    })
-  );
+  const fileFeatures=installFileRoutes(router,{root,wrap,project:(who,id)=>service.project(who,id,"files")});
   router.post(
     "/files",
     wrap(async (c, who) => {
@@ -369,5 +356,5 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
     })
   );
   return { router, service, closeStreams() { for (const stream of streams) stream.destroy(); },
-    close() { void queue.close(); for (const stream of streams) stream.destroy(); service.disconnect(); usage.close(); } };
+    close() { fileFeatures.close(); void queue.close(); for (const stream of streams) stream.destroy(); service.disconnect(); usage.close(); } };
 }

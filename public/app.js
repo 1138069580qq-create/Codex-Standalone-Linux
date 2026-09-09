@@ -51,7 +51,7 @@ const q = params => new URLSearchParams(params).toString();
 const apiProject = (route, extra={}) => `/api/codex/${route}?${q({projectId:S.project?.id||'',...extra})}`;
 function permission(name) { return !!S.project?.permissions?.[name]; }
 function closeStream() { clearTimeout(S.streamStableTimer);S.streamStableTimer=null; clearTimeout(S.timer); S.timer=null; S.stream?.close(); S.stream=null; }
-function clearConversation() { globalThis.CodexQueue?.reset();S.turnId=null;S.queueCount=0;globalThis.CodexUsage?.metrics(null); clearTimeout(S.creationTimer);S.creationTimer=null;S.newTask=false;S.newTaskConfirmed=false;S.modelRequest=null;S.modelsUnavailable=false;S.taskCreation=null;S.epoch++; closeStream(); if(!S.sideOrigin)$('side-context').hidden=true; clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='新任务'; S.selected=[]; S.references=[]; S.goalDraft=''; S.accessConfirmed=false; S.tokenUsage=null; S.threadSettings=null; S.settingsOverrides={}; $('access').value='default'; closeMenu(); $('prompt').value=''; renderAttachments(); controls(); }
+function clearConversation() { globalThis.CodexFeatures?.reset(); globalThis.CodexQueue?.reset();S.turnId=null;S.queueCount=0;globalThis.CodexUsage?.metrics(null); clearTimeout(S.creationTimer);S.creationTimer=null;S.newTask=false;S.newTaskConfirmed=false;S.modelRequest=null;S.modelsUnavailable=false;S.taskCreation=null;S.epoch++; closeStream(); if(!S.sideOrigin)$('side-context').hidden=true; clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='新任务'; S.selected=[]; S.references=[]; S.goalDraft=''; S.accessConfirmed=false; S.tokenUsage=null; S.threadSettings=null; S.settingsOverrides={}; $('access').value='default'; closeMenu(); $('prompt').value=''; renderAttachments(); controls(); }
 function loggedOut() { globalThis.CodexUsage?.reset(); S.sideOrigin=null;$('side-context').hidden=true;$('side-history').replaceChildren();clearConversation(); S.user=null; S.csrf=''; S.connected=false; S.attachedThreadId=null; S.capabilities={}; S.projects=[]; S.threads=[]; S.project=null; S.models=[]; S.items.clear(); $('workspace').hidden=true; $('login-view').hidden=false; $('settings-dialog').close(); $('new-thread-dialog').close(); for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close(); setAuthMode('login'); S.catalog=null; }
 function supports(capability) {
   if(capability==='createThread' && S.attachedThreadId)return false;
@@ -314,6 +314,7 @@ function scheduleReconnect(epoch){
 }
 function scheduleRender(){ if(!S.renderTimer) S.renderTimer=setTimeout(()=>{S.renderTimer=null;renderTimeline();},80); }
 function renderTimeline(){
+  if(globalThis.CodexFeatures)return globalThis.CodexFeatures.renderTimeline();
   const timeline=$('timeline'); const follow=timeline.scrollHeight-timeline.scrollTop-timeline.clientHeight<120;
   $('empty').hidden=!!S.thread;
   for(const [id,node] of S.nodes) if(!S.items.has(id)){node.root.remove();S.nodes.delete(id);}
@@ -447,9 +448,8 @@ async function uploadFile(){
     if(S.attachments.length+files.length>5)throw new Error('最多 5 个附件。');
     for(const file of files){
       if(file.size>4*1024*1024)throw new Error(`${file.name} 超过 4 MiB。`);
-      const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(new Error('无法读取文件'));reader.readAsDataURL(file);});
       if(epoch!==S.epoch || !projectId)throw new Error('项目已切换，已取消上传。');
-      const result=await api('/api/codex/files',{projectId,name:file.name,base64:data});
+      const result=await globalThis.CodexFeatures.upload(file,projectId,epoch);
       if(epoch!==S.epoch)return;
       S.attachments.push(result.path);renderAttachments();
     }
@@ -496,22 +496,22 @@ function renderQuota(limits){
   }
 }
 function shortDate(value){return new Date(value<1e12?value*1000:value).toLocaleString('zh-CN',{month:'long',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});}
-async function loadFiles(){if(!permission('files'))throw new Error('没有文件权限。');const epoch=S.epoch;const requested=S.filePath;const result=await api(apiProject('files',{path:requested}));if(epoch!==S.epoch||requested!==S.filePath)return;$('file-path').textContent=`/${requested==='.'?'':requested}`;$('file-list').replaceChildren();for(const entry of result.entries){if(entry.type==='directory'){const button=el('button',`▸ ${entry.name}`,'file-entry');button.onclick=action(async()=>{S.filePath=entry.path;await loadFiles();});$('file-list').append(button);}else{const link=el('a',entry.name,'file-entry');link.href=apiProject('files/content',{path:entry.path});link.download=entry.name;link.append(el('span',bytes(entry.size)));$('file-list').append(link);}}if(!result.entries.length)$('file-list').append(el('p','空目录或没有可展示的文件。','footnote')); }
+async function loadFiles(){return globalThis.CodexFeatures.loadFiles();}
 async function loadDiff(){if(!permission('files'))throw new Error('没有文件权限。');const epoch=S.epoch;const result=await api(apiProject('diff'));if(epoch===S.epoch)$('diff-content').textContent=(result.text||'没有未提交的差异。')+(result.truncated?'\n[已截断到 256 KiB]':''); }
-async function switchPanel(panel){S.panel=panel;for(const name of ['quota','files','diff'])$('panel-'+name).hidden=name!==panel;for(const b of document.querySelectorAll('[data-panel]')){const active=b.dataset.panel===panel;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active));}if(panel==='files')await loadFiles();if(panel==='quota')await loadQuota();}
+async function switchPanel(panel){S.panel=panel;for(const name of ['quota','files','diff','browser'])$('panel-'+name).hidden=name!==panel;for(const b of document.querySelectorAll('[data-panel]')){const active=b.dataset.panel===panel;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active));}if(panel==='files')await loadFiles();if(panel==='quota')await loadQuota();}
 async function openSettings(){$('settings-dialog').showModal();const config=await api('/api/codex/admin/config');$('transport').value=config.transport.type;$('endpoint').value=config.transport.endpoint;$('token-env').value=config.transport.bearerTokenEnv||'';$('concurrency').value=5;$('enabled').checked=config.enabled;$('projects-json').value=JSON.stringify(config.projects,null,2);$('candidates').replaceChildren();await loadUsers();}
 let usersSequence=0;
-async function loadUsers(){if(!S.user?.admin)return;const account=S.user.id,sequence=++usersSequence;const users=await api('/api/admin/users');if(sequence!==usersSequence||account!==S.user?.id||!S.user?.admin)return;$('users-list').replaceChildren();for(const user of users){const row=el('div',undefined,'user-record'),info=el('div');info.append(el('strong',`${user.username}${user.admin?' · 管理员':''}`),el('code',user.id));const edit=el('button','编辑','small');edit.type='button';edit.onclick=()=>{$('edit-user-id').value=user.id;$('new-username').value=user.username;$('new-admin').checked=user.admin;$('new-password').value='';$('new-username').focus();};row.append(info,edit);$('users-list').append(row);} await globalThis.CodexUsage?.loadAdminMembers(); }
+async function loadUsers(){if(!S.user?.admin)return;const account=S.user.id,sequence=++usersSequence;const users=await api('/api/admin/users');if(sequence!==usersSequence||account!==S.user?.id||!S.user?.admin)return;$('users-list').replaceChildren();for(const user of users){const row=el('div',undefined,'user-record'),info=el('div');info.append(el('strong',`${user.username}${user.admin?' · 管理员':''}`),el('code',user.id));const edit=el('button','编辑','small');edit.type='button';edit.onclick=()=>{$('edit-user-id').value=user.id;$('new-username').value=user.username;$('new-admin').checked=user.admin;$('new-password').value='';$('new-username').focus();};row.append(info,edit);$('users-list').append(row);} await globalThis.CodexUsage?.loadAdminMembers(); await globalThis.CodexFeatures?.loadRegistrations(); }
 let authMode='login';
 function setAuthMode(mode){
-  authMode=mode;const registering=mode==='register';$('login-title').textContent=registering?'注册普通账户':'登录';$('login-submit').textContent=registering?'注册并登录':'登录';$('register-note').hidden=!registering;
+  authMode=mode;const registering=mode==='register';$('login-title').textContent=registering?'申请普通账户':'登录';$('login-submit').textContent=registering?'提交注册申请':'登录';$('register-note').hidden=!registering;
   $('password').autocomplete=registering?'new-password':'current-password';$('password').minLength=registering?12:0;$('password').value='';$('password-confirm').value='';$('password-confirm-label').hidden=!registering;$('password-confirm').required=registering;
   $('login-error').textContent='';for(const mode of ['login','register']){$('auth-'+mode).classList.toggle('active',authMode===mode);$('auth-'+mode).setAttribute('aria-selected',String(authMode===mode));}
 }
 $('auth-login').onclick=()=>setAuthMode('login');$('auth-register').onclick=()=>setAuthMode('register');
 $('login-form').onsubmit=async event=>{
   event.preventDefault();const button=$('login-submit'),mode=authMode;button.disabled=true;$('auth-login').disabled=true;$('auth-register').disabled=true;$('login-error').textContent='';$('login-error').hidden=false;
-  try{if(mode==='register'&&$('password').value!==$('password-confirm').value)throw new Error('两次输入的密码不一致。');const result=await api('/api/'+mode,{username:$('username').value.trim(),password:$('password').value});$('password-confirm').value='';await signedIn(result);}
+  try{if(mode==='register'&&$('password').value!==$('password-confirm').value)throw new Error('两次输入的密码不一致。');const result=await api('/api/'+mode,{username:$('username').value.trim(),password:$('password').value});$('password-confirm').value='';if(mode==='register'){setAuthMode('login');$('login-error').hidden=false;$('login-error').textContent=result.message||'申请已提交，管理员批准后才能登录。';}else await signedIn(result);}
   catch(error){$('login-error').textContent=error.message;}finally{button.disabled=false;$('auth-login').disabled=false;$('auth-register').disabled=false;}
 };
 $('logout').onclick=action(async()=>{await api('/api/logout',{});loggedOut();});

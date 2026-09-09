@@ -464,7 +464,7 @@ export class CodexConsoleService {
         for (const turn of [...(history.data || [])].reverse()) {
           if (turn.status === "inProgress") session.turnId = turn.id;
           for (const raw of turn.items || []) {
-            const item = normalizeItem(raw);
+            const item = normalizeItem(raw, this.config.value.projects.find(project=>project.id===session.projectId)?.root, turn.id);
             session.items.set(item.id, item);
           }
         }
@@ -922,7 +922,10 @@ export class CodexConsoleService {
     }
     if (method === "item/started" || method === "item/completed") {
       this.flushDeltas();
-      const item = normalizeItem(p.item);
+      const prior=session.items.get(String(p.item?.id));
+      const item = normalizeItem(p.item,this.config.value.projects.find(project=>project.id===session.projectId)?.root,p.turnId||session.turnId);
+      item.startedAt ??= prior?.startedAt ?? (method==="item/started"?Date.now():undefined);
+      if(method==="item/completed") {item.finishedAt ??= Date.now();if(item.durationMs===undefined&&item.startedAt!==undefined)item.durationMs=Math.max(0,item.finishedAt-item.startedAt);}
       session.items.set(item.id, item);
       this.trim(session);
       this.hub.publish({ type: "item", projectId: session.projectId, threadId: id, payload: item });

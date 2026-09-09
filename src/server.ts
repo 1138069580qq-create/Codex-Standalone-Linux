@@ -9,6 +9,8 @@ import { promisify } from "node:util";
 import { UserStore, Sessions, RateLimiter, hashPassword, verifyPassword, publicUser } from "./auth";
 import { ConsoleError, requireAdmin } from "./backend/config";
 import { ProtectedConfigStore } from "./protected-config";
+import { RegistrationQueue } from "./registration";
+import { CHUNK_BYTES, readBounded } from "./backend/transfers";
 import { settings } from "./settings";
 import { createCodexRoutes, type ServiceFactory } from "./routes";
 const zip = promisify(gzip);
@@ -26,6 +28,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
   if(!config.value.defaultOwnerId||config.value.projects.some(p=>!p.ownerId)) {
     await config.save({...config.value,defaultOwnerId,projects:config.value.projects.map(p=>({...p,ownerId:p.ownerId||(p.grants.filter(g=>g.permissions.includes("view")).length===1?p.grants.find(g=>g.permissions.includes("view"))!.userId:defaultOwnerId)}))});
   }
+  const registrations = new RegistrationQueue(path.join(options.dataDir,"registrations.json"),users); await registrations.load();
   const sessions = new Sessions(); const limiter = new RateLimiter();
   const cookieName = options.secureCookies ? "__Host-codex_webui" : "codex_webui";
   // A normal-cost dummy hash prevents the missing-user path becoming a username oracle.
@@ -45,7 +48,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
     ctx.set("Referrer-Policy", "no-referrer");
     ctx.set("X-Frame-Options", "DENY");
     ctx.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
-    ctx.set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+    ctx.set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; media-src 'self'; frame-src 'self' https:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
     if (options.secureCookies) ctx.set("Strict-Transport-Security", "max-age=31536000");
     ctx.set("Cache-Control", "no-store");
     try { await next(); }
@@ -90,6 +93,13 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
   const parseLogin = bodyParser({ enableTypes: ["json"], jsonLimit: "4kb", strict: true });
   app.use(async (ctx, next) => {
     if (!["POST", "PUT", "PATCH"].includes(ctx.method)) return next();
+    if (ctx.method === "PUT" && /^\/api\/codex\/uploads\/[^/]+$/.test(ctx.path)) {
+      if (!ctx.is("application/octet-stream")) throw new ConsoleError(415,"BINARY_REQUIRED","Send application/octet-stream.");
+      if (parsing >= 4) throw new ConsoleError(429,"BODY_BUSY","Too many concurrent uploads.");
+      if(Number(ctx.get("content-length"))>CHUNK_BYTES)throw new ConsoleError(413,"TRANSFER_TOO_LARGE","Chunk exceeds 256 KiB.");
+      parsing++;try { ctx.request.body=await readBounded(ctx.req,CHUNK_BYTES); } finally { parsing--; }
+      return next();
+    }
     if (!ctx.is("application/json")) throw new ConsoleError(415, "JSON_REQUIRED", "Send application/json.");
     if (parsing >= 4) throw new ConsoleError(429, "BODY_BUSY", "Too many uploads; try again later.");
     parsing++;
@@ -124,12 +134,8 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
       throw new ConsoleError(400, "INVALID_REGISTRATION", "注册只需用户名和密码，不能设置账户权限。");
     authInFlight++;
     try {
-      // Never spread public input into the administrative upsert API.
-      const createdUser = await users.upsert({ username: body.username, password: body.password, admin: false });
-      const user = users.users.find(u => u.id === createdUser.id)!;
-      sessions.revoke(token(ctx));
-      const created = sessions.create(user); setCookie(ctx, created.token, 12 * 3600_000);
-      ctx.status = 201; ctx.body = { user: publicUser(user), csrf: created.csrf };
+      ctx.body = await registrations.submit(body.username, body.password);
+      ctx.status = 202;
     } finally { authInFlight--; }
   });
   auth.post("/api/logout", ctx => { sessions.revoke(token(ctx)); setCookie(ctx, "", 0); routes.closeStreams(); ctx.body = { ok: true }; });
@@ -141,10 +147,12 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
     // Role/password changes revoke affected sessions immediately, including open SSE.
     routes.closeStreams();
   });
+  auth.get("/api/admin/registrations",ctx=>{requireAdmin(current(ctx)!.identity);ctx.body=registrations.list();});
+  auth.post("/api/admin/registrations/:id",async ctx=>{const who=current(ctx)!;requireAdmin(who.identity);limiter.take(`review:${who.user.id}`,30,60000);ctx.body=await registrations.review(ctx.params.id,(ctx.request.body as any)?.decision);});
   app.use(auth.routes()).use(auth.allowedMethods());
   app.use(routes.router.routes()).use(routes.router.allowedMethods());
   const assets = new Map<string, { raw: Buffer; gzip: Buffer; br: Buffer; etag: string; type: string }>();
-  const allowed = [["/", "index.html", "text/html"], ["/app.js", "app.js", "text/javascript"], ["/queue.js", "queue.js", "text/javascript"], ["/state.js", "state.js", "text/javascript"], ["/usage.js", "usage.js", "text/javascript"], ["/style.css", "style.css", "text/css"]];
+  const allowed = [["/", "index.html", "text/html"], ["/features.js", "features.js", "text/javascript"], ["/app.js", "app.js", "text/javascript"], ["/queue.js", "queue.js", "text/javascript"], ["/state.js", "state.js", "text/javascript"], ["/usage.js", "usage.js", "text/javascript"], ["/style.css", "style.css", "text/css"]];
   const assetVersions = new Map<string,string>();
   for(const [route,filename] of allowed) if(route !== "/") assetVersions.set(route,createHash("sha256").update(await fs.readFile(path.join(staticDir,filename))).digest("hex").slice(0,12));
   for (const [route, filename, type] of allowed) {

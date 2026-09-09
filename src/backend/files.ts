@@ -15,8 +15,8 @@ import { Readable } from "node:stream";
 import { ConsoleError } from "./config";
 
 const MAX_LIST_ENTRIES = 500;
-const MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024;
-const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+export const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
+export const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 const MAX_DIFF_BYTES = 256 * 1024;
 const MAX_RELATIVE_PATH_CHARS = 4096;
 const UPLOAD_DIRECTORY = ".codex-uploads";
@@ -71,7 +71,7 @@ function privateComponent(component: string): boolean {
   );
 }
 
-function parseRelativePath(value: unknown, allowRoot: boolean): SafeRelativePath {
+export function parseRelativePath(value: unknown, allowRoot: boolean): SafeRelativePath {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
@@ -297,12 +297,14 @@ export async function listProjectFiles(
 
 export async function openProjectDownload(
   root: string,
-  relativePath: string
-): Promise<{ stream: Readable; name: string; size: number }> {
+  relativePath: string,
+  options: { range?: string; ifRange?: string; ifNoneMatch?: string; previewBytes?: number; maxSourceBytes?: number } = {}
+): Promise<{ stream: Readable; name: string; size: number; total: number; etag: string; modified: string; status: number; contentRange?: string }> {
   const resolved = await resolveExistingPath(root, relativePath);
   if (!resolved.stat.isFile()) fail(400, "NOT_A_FILE", "Only regular files can be downloaded.");
-  if (resolved.stat.size > MAX_DOWNLOAD_BYTES)
-    fail(413, "FILE_TOO_LARGE", "The requested file exceeds the download size limit.");
+  const sourceLimit = options.maxSourceBytes === undefined ? MAX_DOWNLOAD_BYTES : Math.min(MAX_DOWNLOAD_BYTES, Math.max(1, options.maxSourceBytes));
+  if (resolved.stat.size > sourceLimit)
+    fail(413, "FILE_TOO_LARGE", options.maxSourceBytes === undefined ? "The requested file exceeds the download size limit." : "The preview source exceeds the preview size limit.");
   let fd: number | undefined;
   const close = (descriptor: number) =>
     new Promise<void>((resolve) => closeFd(descriptor, () => resolve()));
@@ -317,20 +319,42 @@ export async function openProjectDownload(
     const stat = await new Promise<Stats>((resolve, reject) =>
       statFd(fd!, (error, value) => (error ? reject(error) : resolve(value)))
     );
-    await verifyOpenFile(resolved, stat, MAX_DOWNLOAD_BYTES);
+    await verifyOpenFile(resolved, stat, sourceLimit);
+    const etag = `"${stat.ino.toString(16)}-${stat.size.toString(16)}-${stat.mtimeMs.toString(16)}-${stat.ctimeMs.toString(16)}"`;
+    const modified = stat.mtime.toUTCString();
+    let start = 0, end = stat.size - 1, status = 200;
+    if (options.ifNoneMatch === "*" || options.ifNoneMatch?.split(",").map(v => v.trim().replace(/^W\//, "")).includes(etag)) {
+      await close(fd); fd = undefined;
+      return { stream: Readable.from([]), name: readableName(resolved), size: 0, total: stat.size, etag, modified, status: 304 };
+    }
+    if (options.range && (!options.ifRange || options.ifRange === etag || options.ifRange === modified)) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(options.range);
+      if (!match || (!match[1] && !match[2]) || stat.size === 0) fail(416, "INVALID_RANGE", "Only one satisfiable byte range is supported.");
+      if (!match[1]) start = Math.max(0, stat.size - Number(match[2]));
+      else { start = Number(match[1]); if (match[2]) end = Math.min(end, Number(match[2])); }
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start > end || start >= stat.size)
+        fail(416, "INVALID_RANGE", "The requested range is outside the file.");
+      status = 206;
+    }
+    if (options.previewBytes !== undefined) {
+      if (!Number.isSafeInteger(options.previewBytes) || options.previewBytes < 1 || start !== 0) fail(400, "INVALID_PREVIEW", "Invalid preview range.");
+      end = Math.min(end, options.previewBytes - 1);
+    }
+    const metadata = { name: readableName(resolved), size: Math.max(0, end - start + 1), total: stat.size, etag, modified, status,
+      ...(status === 206 ? { contentRange: `bytes ${start}-${end}/${stat.size}` } : {}) };
     if (stat.size === 0) {
       await close(fd);
       fd = undefined;
-      return { stream: Readable.from([]), name: readableName(resolved), size: 0 };
+      return { stream: Readable.from([]), ...metadata };
     }
     const stream = createReadStream(resolved.path, {
       fd,
       autoClose: true,
-      start: 0,
-      end: stat.size - 1
+      start,
+      end
     });
     fd = undefined; // ownership transfers to ReadStream, including disconnects
-    return { stream, name: readableName(resolved), size: stat.size };
+    return { stream, ...metadata };
   } catch (error) {
     if (fd !== undefined) await close(fd);
     if (error instanceof ConsoleError) throw error;
@@ -396,7 +420,7 @@ function decodeBase64(base64: unknown): Buffer {
   return data;
 }
 
-function safeUploadName(name: unknown): string {
+export function safeUploadName(name: unknown): string {
   if (
     typeof name !== "string" ||
     name.length === 0 ||
@@ -464,8 +488,12 @@ export async function uploadProjectFile(
   name: string,
   base64: string
 ): Promise<{ path: string }> {
+  return uploadProjectBuffer(root, name, decodeBase64(base64));
+}
+
+export async function uploadProjectBuffer(root: string, name: string, data: Buffer): Promise<{ path: string }> {
+  if (!Buffer.isBuffer(data) || data.length > MAX_UPLOAD_BYTES) fail(413, "UPLOAD_TOO_LARGE", "The upload exceeds the 4 MiB limit.");
   const projectRoot = await canonicalProjectRoot(root);
-  const data = decodeBase64(base64);
   const storedName = `${randomUUID()}-${safeUploadName(name)}`;
   const directory = await uploadDirectory(projectRoot);
   const destination = path.join(directory, storedName);

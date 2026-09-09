@@ -68,12 +68,12 @@ export class DesktopSessionService extends CodexConsoleService {
     for(const turn of this.turns().slice(-20))for(const raw of turn.items||[]){
       // Render only public message/tool fields, never private reasoning content or raw tool arguments.
       if(raw.type==='reasoning')continue;
-      const item=normalizeItem(raw);next.set(item.id,item);
+      const item=normalizeItem(raw,project.root,turn.turnId||turn.id);next.set(item.id,item);
     }
     let size=[...next.values()].reduce((n,v)=>n+v.text.length,0);
     while(next.size>200||size>512*1024){const key=next.keys().next().value!;size-=next.get(key)!.text.length;next.delete(key);}
-    for(const [id,item]of next){const prior=this.items.get(id);if(prior?.text===item.text&&prior.status===item.status)continue;
-      if(prior&&item.text.startsWith(prior.text)&&item.status===prior.status)this.hub.publish({type:'delta',projectId:project.id,threadId:this.desktop.threadId,payload:{itemId:id,offset:prior.text.length,text:item.text.slice(prior.text.length)}});
+    for(const [id,item]of next){const prior=this.items.get(id);const sameMeta=prior&&JSON.stringify([prior.durationMs,prior.images,prior.turnId])===JSON.stringify([item.durationMs,item.images,item.turnId]);if(prior?.text===item.text&&prior.status===item.status&&sameMeta)continue;
+      if(prior&&sameMeta&&item.text.startsWith(prior.text)&&item.status===prior.status)this.hub.publish({type:'delta',projectId:project.id,threadId:this.desktop.threadId,payload:{itemId:id,offset:prior.text.length,text:item.text.slice(prior.text.length)}});
       else this.hub.publish({type:'item',projectId:project.id,threadId:this.desktop.threadId,payload:item});
     }
     this.items=next;

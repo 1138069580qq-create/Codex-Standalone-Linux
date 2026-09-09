@@ -129,7 +129,7 @@ test("openProjectDownload yields a bounded node Readable for regular project fil
   await expectCode(openProjectDownload(root, "directory"), "NOT_A_FILE");
   const large = await fs.open(path.join(root, "too-large.bin"), "w");
   try {
-    await large.truncate(8 * MIB + 1);
+    await large.truncate(512 * MIB + 1);
   } finally {
     await large.close();
   }

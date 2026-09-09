@@ -111,3 +111,16 @@ Nginx 配置与 systemd 单元在本次环境中只做静态检查，未在你�
 | SSE 延迟很大 | 反代是否缓冲；是否使用了全局压缩过滤器；检查 Nginx location |
 | 项目忙 / 并发上限 | 等待任务完成，或为独立项目配置不同 worktree |
 | 新建 app-server 看不到桌面任务状态 | 独立 app-server 不等于桌面共享实例，须确认桌面的实际共享接口 |
+
+
+## 1.5.0 从现有 1.4.2 增量升级
+
+1. 使用现有 `codex/standalone-linux` 分支，只允许干净工作树 `git merge --ff-only` 到已验证提交，不覆盖服务器本地改动。
+2. 使用同一服务用户和同一数据目录。新队列文件 `registrations.json` 自动初始化，旧 `users.json` 的账号/密码/角色不做迁移或重置。
+3. 安装锁文件中的 `sharp`、`fflate` 及匹配服务器平台的 optional 图片编解码包；无需构建，也不启动开发服务。
+4. 在停服务前可把 Git 目标树导出到独立候选目录并一次性跑 `npm run check`、完整 `npm test`、真实 PNG/JPEG/WebP/AVIF 编码测试，避免将 Windows 原生依赖复制到 Linux。
+5. 只重启 `codex-webui.service`。不要重启 Codex，不要发真实模型消息/创建真实桌面任务/消耗重置卡进行测试。
+6. 服务恢复后核对 `/healthz`、6 个静态资源（含 `features.js`）的 SHA-256、注册审批和预览界面的实际 HTML。保护配置和数据目录保持原位。
+7. Nginx 原 SSE location 不变；文件内容路由不要开启会缓冲全文件的代理处理。下载的 Range、ETag、Content-Range、Content-Disposition 应原样返回。可按需在反代启用静态文件 gzip，源站已有 br/gzip。
+
+功能限制：图像全屏预览为全分辨率安全 WebP 转码，不是原文件字节；下载按钮仍提供原文件。客户端/网络真实可用吞吐不会因续传本身增加，减少的是重复传输与误下载。外部下载 `downloadHosts` 默认为空，不需要 GitHub token。

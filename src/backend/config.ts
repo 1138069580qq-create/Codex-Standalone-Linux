@@ -20,6 +20,7 @@ export interface Identity {
   role?: number;
 }
 export interface Project {
+  downloadHosts?: string[];
   ownerId?: string;
   desktopProjectId?: string;
   desktopSavedProjectId?: string;
@@ -149,8 +150,11 @@ export async function validateConfig(value: unknown): Promise<ConsoleConfig> {
       users.add(g.userId);
       return { userId: g.userId, permissions: Array.from(new Set(g.permissions)) };
     });
+    if (p.downloadHosts !== undefined && (!Array.isArray(p.downloadHosts) || p.downloadHosts.length > 10 ||
+        p.downloadHosts.some(h => typeof h !== "string" || h.length > 253 || !/^(?=.{1,253}$)[a-z0-9]+(?:[.-][a-z0-9]+)+$/.test(h))))
+      invalid("Downloads require up to ten exact lowercase HTTPS hostnames, not URLs or wildcards.");
     if(p.ownerId!==undefined && (typeof p.ownerId!=="string" || !/^[-a-zA-Z0-9_]{1,128}$/.test(p.ownerId))) invalid("Invalid project owner.");
-    projects.push({ ...(p.ownerId?{ownerId:p.ownerId}:{}), id: p.id, name: p.name.trim(), root: root!, grants, ...(typeof p.desktopProjectId==='string' && /^[-a-zA-Z0-9_]{1,128}$/.test(p.desktopProjectId)?{desktopProjectId:p.desktopProjectId}:{}), ...(typeof p.desktopSavedProjectId==='string' && /^[-a-zA-Z0-9_]{1,128}$/.test(p.desktopSavedProjectId)?{desktopSavedProjectId:p.desktopSavedProjectId}:{}) });
+    projects.push({ ...(p.ownerId?{ownerId:p.ownerId}:{}), id: p.id, name: p.name.trim(), root: root!, grants, ...(p.downloadHosts ? {downloadHosts: [...new Set(p.downloadHosts)]} : {}), ...(typeof p.desktopProjectId==='string' && /^[-a-zA-Z0-9_]{1,128}$/.test(p.desktopProjectId)?{desktopProjectId:p.desktopProjectId}:{}), ...(typeof p.desktopSavedProjectId==='string' && /^[-a-zA-Z0-9_]{1,128}$/.test(p.desktopSavedProjectId)?{desktopSavedProjectId:p.desktopSavedProjectId}:{}) });
     ids.add(p.id);
   }
   return {
