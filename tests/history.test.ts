@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test from 'node:test';import {webcrypto} from 'node:crypto';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
@@ -6,14 +6,14 @@ import path from 'node:path';
 import {CodexRpcError} from '../src/backend/transport';
 import {readThreadHistory} from '../src/backend/history';
 import {publicBackendError} from '../src/backend/errors';
-const c:any={TextEncoder,URL};vm.createContext(c);vm.runInContext(readFileSync(path.join(__dirname,'../public/history.js'),'utf8'),c);const H=c.CodexHistoryCore;
+const c:any={TextEncoder,TextDecoder,crypto:webcrypto,Buffer,URL};vm.createContext(c);vm.runInContext(readFileSync(path.join(__dirname,'../public/history.js'),'utf8'),c);const H=c.CodexHistoryCore;
 const item=(text='hello')=>({id:'item',type:'agentMessage',text,turnId:'turn'});
-test('cache sanitizes executable state, tokens and media handles, retaining bounded Unicode text',()=>{
-  const row=H.snapshot({items:[{...item('中文🙂'.repeat(70000)),token:'secret',images:[{src:'native-handle'}]}],turns:[{id:'turn',status:'inProgress',secret:'x'}],pending:[{id:'approval'}],cursor:'cursor',queue:[{text:'write'}]});
-  assert.ok(new TextEncoder().encode(JSON.stringify(row)).length<=H.MAX_BYTES);assert.ok(row.items[0].truncated);for(const secret of ['native-handle','secret','approval','cursor','queue'])assert.ok(!JSON.stringify(row).includes(secret));
+test('local records exclude executable state and credentials, retaining complete Unicode text',()=>{
+  const row=H.snapshot({items:[{...item('中文🙂'.repeat(70000)),token:'secret',images:[{path:'saved.png'}]}],turns:[{id:'turn',status:'inProgress',secret:'x'}],pending:[{id:'approval'}],cursor:'cursor',queue:[{text:'write'}]});
+  assert.ok(new TextEncoder().encode(JSON.stringify(row)).length<=H.MAX_BYTES);assert.equal(row.items[0].text,'中文🙂'.repeat(70000));for(const secret of ['secret','approval','cursor','queue'])assert.ok(!JSON.stringify(row).includes(secret));
   assert.equal(row.items[0].turnId,'turn');assert.equal(row.truncated,false);
 });
-test('cache task list excludes permissions, server paths and unbounded titles',()=>{const rows=H.threads(Array.from({length:130},(_,i)=>({id:String(i),title:'x'.repeat(1000),root:'/private',permissions:{send:true}})));assert.equal(rows.data.length,120);assert.equal(rows.data[0].title.length,240);assert.ok(!JSON.stringify(rows).includes('permissions'));});
+test('local task list excludes permissions and server paths without count eviction',()=>{const rows=H.threads(Array.from({length:130},(_,i)=>({id:String(i),title:'x'.repeat(1000),root:'/private',permissions:{send:true}})));assert.equal(rows.data.length,130);assert.equal(rows.data[0].title.length,1000);assert.ok(!JSON.stringify(rows).includes('permissions'));});
 test('history isolation across logout, account, server, project and task',async()=>{
   const data=new Map<string,string>();let server='https://one.test';
   const plugin={profile:async()=>({baseUrl:server}),historyCache:async({key,value}:any)=>{if(value!==undefined)data.set(key,value);return {value:data.get(key)||''};}};
@@ -21,20 +21,18 @@ test('history isolation across logout, account, server, project and task',async(
   await cache.init({id:'b'});assert.equal(await cache.read('p','t'),null);await cache.init({id:'a'});assert.equal((await cache.read('p','t')).items[0].text,'hello');assert.equal(await cache.read('p2','t'),null);assert.equal(await cache.read('p','t2'),null);
   server='https://two.test';await cache.init({id:'a'});assert.equal(await cache.read('p','t'),null);
 });
-test('TTL, future dates, corrupt records, byte cap, LRU and empty snapshots',async()=>{
-  let now=100000;const cache=H.create({now:()=>now});await cache.init({id:'a'});await cache.write('p','t',H.snapshot({items:[]},now));assert.deepEqual(Array.from((await cache.read('p','t')).items),[]);
-  now+=H.TTL+1;assert.equal(await cache.read('p','t'),null);await cache.write('p','future',H.snapshot({items:[]},now+60001));assert.equal(await cache.read('p','future'),null);
-  await assert.rejects(cache.write('p','huge',{text:'文'.repeat(H.MAX_BYTES)}),/上限/);
-  for(let i=0;i<40;i++)await cache.write('p',String(i),H.snapshot({items:[item()]},now));assert.equal(await cache.read('p','0'),null);assert.ok(await cache.read('p','39'));
-  const broken=H.create({plugin:{profile:async()=>({baseUrl:'https://x.test'}),historyCache:async()=>({value:'not-json'})}});await broken.init({id:'a'});assert.equal(await broken.read('p','t'),null);
+test('permanent records retain old dates and more than 32 tasks; corruption reports without deletion',async()=>{
+ let now=100000;const storage=H.memoryStore(),cache=H.create({storage,now:()=>now});await cache.init({id:'a'});await cache.write('p','t',H.snapshot({items:[]},now));now+=1000*86400000;assert.deepEqual(Array.from((await cache.read('p','t')).items),[]);
+ await assert.rejects(cache.write('p','huge',{text:'文'.repeat(H.MAX_BYTES)}),/过大/);
+ for(let i=0;i<40;i++)await cache.write('p',String(i),H.snapshot({items:[item()]},now));assert.ok(await cache.read('p','0'));assert.ok(await cache.read('p','39'));
+ const broken=H.create({plugin:{profile:async()=>({baseUrl:'https://x.test'}),historyCache:async()=>({value:'not-json'})}});await broken.init({id:'a'});await assert.rejects(broken.read('p','t'));
 });
 test('late cache read is ignored after account reset and native write errors propagate',async()=>{
   let resolve!:(value:any)=>void;const cache=H.create({plugin:{profile:async()=>({baseUrl:'https://x.test'}),historyCache:()=>new Promise(r=>resolve=r)}});await cache.init({id:'a'});const read=cache.read('p','t');await Promise.resolve();await Promise.resolve();cache.reset();resolve({value:JSON.stringify(H.snapshot({items:[item()]}))});assert.equal(await read,null);
   const failed=H.create({plugin:{profile:async()=>({baseUrl:'https://x.test'}),historyCache:async()=>{throw Error('disk full');}}});await failed.init({id:'a'});await assert.rejects(failed.write('p','t',H.snapshot({items:[]})),/disk full/);
 });
-test('queued cache writes are serialized and cancelled at an account boundary',async()=>{
-  const calls:any[]=[];let release!:()=>void;const cache=H.create({plugin:{profile:async()=>({baseUrl:'https://x.test'}),historyCache:async(value:any)=>{calls.push(value);if(calls.length===1)await new Promise<void>(r=>release=r);}}});await cache.init({id:'a'});
-  const first=cache.write('p','t',H.snapshot({items:[item('first')]}));await Promise.resolve();await Promise.resolve();const second=cache.write('p','t',H.snapshot({items:[item('second')]}));cache.reset();release();await Promise.all([first,second]);assert.equal(calls.length,1);
+test('queued archive writes retain their original account scope across logout',async()=>{
+ const storage=H.memoryStore(),cache=H.create({storage});await cache.init({id:'a'});const first=cache.write('p','t',H.snapshot({items:[item('first')]})),second=cache.write('p','t',H.snapshot({items:[item('second')]}));cache.reset();await Promise.all([first,second]);await cache.init({id:'b'});assert.equal(await cache.read('p','t'),null);await cache.init({id:'a'});assert.equal((await cache.read('p','t')).items[0].text,'second');
 });
 test('paged history does not fall back when supported',async()=>{const calls:string[]=[];const out=await readThreadHistory(async method=>{calls.push(method);return {data:[{id:'last'}]};},'t');assert.deepEqual(calls,['thread/turns/list']);assert.equal(out.data[0].id,'last');});
 test('old history method-not-found falls back to read-only full history with ordering and truncation',async()=>{

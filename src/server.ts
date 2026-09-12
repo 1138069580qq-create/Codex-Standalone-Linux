@@ -7,7 +7,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { gzip, gzipSync, brotliCompressSync } from "node:zlib";
 import { promisify } from "node:util";
-import { UserStore, Sessions, RateLimiter, hashPassword, verifyPassword, publicUser } from "./auth";
+import { UserStore, Sessions, SESSION_LIFETIME_MS, RateLimiter, hashPassword, verifyPassword, publicUser } from "./auth";
 import { ConsoleError, requireAdmin } from "./backend/config";
 import { ProtectedConfigStore } from "./protected-config";
 import { RegistrationQueue } from "./registration";
@@ -30,7 +30,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
     await config.save({...config.value,defaultOwnerId,projects:config.value.projects.map(p=>({...p,ownerId:p.ownerId||(p.grants.filter(g=>g.permissions.includes("view")).length===1?p.grants.find(g=>g.permissions.includes("view"))!.userId:defaultOwnerId)}))});
   }
   const registrations = new RegistrationQueue(path.join(options.dataDir,"registrations.json"),users); await registrations.load();
-  const sessions = new Sessions(); const limiter = new RateLimiter();
+  const sessions = new Sessions(path.join(options.dataDir,"sessions.json")); await sessions.load(); const limiter = new RateLimiter();
   const cookieName = options.secureCookies ? "__Host-codex_webui" : "codex_webui";
   // A normal-cost dummy hash prevents the missing-user path becoming a username oracle.
   const dummy = await hashPassword("not-a-real-login-" + Date.now());
@@ -146,7 +146,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
     try { valid = await verifyPassword(body.password, user?.passwordHash || dummy); } finally { authInFlight--; }
     if (!valid || !user) throw new ConsoleError(401, "INVALID_LOGIN", "Invalid username or password.");
     sessions.revoke(token(ctx));
-    const created = sessions.create(user); setCookie(ctx, created.token, 12 * 3600_000);
+    const created = sessions.create(user); await sessions.persist();setCookie(ctx, created.token, SESSION_LIFETIME_MS);
     ctx.body = { user: publicUser(user), csrf: created.csrf };
   });
   auth.post("/api/register", async ctx => {
@@ -161,7 +161,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
       ctx.status = 202;
     } finally { authInFlight--; }
   });
-  auth.post("/api/logout", ctx => { sessions.revoke(token(ctx)); setCookie(ctx, "", 0); routes.closeStreams(); ctx.body = { ok: true }; });
+  auth.post("/api/logout", async ctx => { sessions.revoke(token(ctx));await sessions.persist(); setCookie(ctx, "", 0); routes.closeStreams(); ctx.body = { ok: true }; });
   auth.get("/api/admin/users", ctx => { requireAdmin(current(ctx)!.identity); ctx.body = users.users.map(publicUser); });
   auth.put("/api/admin/users", async ctx => {
     const who = current(ctx)!; requireAdmin(who.identity);

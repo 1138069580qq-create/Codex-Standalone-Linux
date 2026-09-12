@@ -1,3 +1,4 @@
+import {historySync} from './backend/history-sync';
 import {STORAGE_ID,ensureStorage} from './backend/account-storage';
 import {randomUUID} from 'node:crypto';
 import {publicBackendError} from './backend/errors';
@@ -74,7 +75,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
         c.set("X-Content-Type-Options", "nosniff");
         rateLimit(who, "requests", 240);
         if (!["GET","HEAD"].includes(c.method)) {
-          rateLimit(who, c.method==="PUT"&&c.path.includes("/uploads/")?"chunks":"writes", c.method==="PUT"&&c.path.includes("/uploads/")?240:40);
+          if(!(c.method==='POST'&&/^\/api\/codex\/threads\/[^/]+\/sync$/.test(c.path)))rateLimit(who, c.method==="PUT"&&c.path.includes("/uploads/")?"chunks":"writes", c.method==="PUT"&&c.path.includes("/uploads/")?240:40);
           const origin = c.get("origin");
           if (origin && origin !== publicOrigin)
             throw new ConsoleError(403, "ORIGIN_DENIED", "Cross-origin writes are not permitted.");
@@ -151,6 +152,8 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
     "/threads/:id",
     wrap(async(c,who)=>{const projectId=param(c,"projectId",64);await recoverReadConnection(who,projectId);const snapshot=await service.snapshot(who,projectId,c.params.id);return {...snapshot,connection:service.status(who),queue:queue.rows(who,projectId,c.params.id)};})
   );
+  router.post('/threads/:id/sync',wrap(async(c,who)=>{const b=body(c);await recoverReadConnection(who,b.projectId);const snapshot=await service.snapshot(who,b.projectId,c.params.id);return historySync({...snapshot,connection:service.status(who),queue:queue.rows(who,b.projectId,c.params.id)},b);}));
+  router.get('/threads/:id/meta',wrap(async(c,who)=>{const projectId=param(c,'projectId',64);await recoverReadConnection(who,projectId);const {items,turns,...meta}=await service.snapshot(who,projectId,c.params.id);return {...meta,connection:service.status(who)};}));
   router.post(
     "/threads/:id/messages",
     wrap((c, who) => {

@@ -81,26 +81,53 @@ export class UserStore {
     return update;
   }
 }
+export const SESSION_LIFETIME_MS=30*24*3600_000;
 type Session = { userId: string; revision: string; csrf: string; expires: number; touched: number };
 export class Sessions {
   private records = new Map<string, Session>();
+  private writing:Promise<void>=Promise.resolve();
+  constructor(private file?:string,private now=Date.now){}
+  async load(){
+    if(!this.file)return;
+    try{
+      const st=await fs.lstat(this.file);if(!st.isFile()||st.isSymbolicLink()||st.size>1024*1024)throw new Error('Invalid session storage');
+      const row=JSON.parse(await fs.readFile(this.file,'utf8'));
+      if(row.version!==1||!Array.isArray(row.sessions)||row.sessions.length>1000)throw new Error('Invalid session storage');
+      const next=new Map<string,Session>();
+      for(const [key,value] of row.sessions){
+        if(typeof key!=='string'||!/^[a-f0-9]{64}$/.test(key)||!value||typeof value.userId!=='string'||typeof value.revision!=='string'||!Number.isFinite(value.expires)||!Number.isFinite(value.touched)||typeof value.csrf!=='string'||!/^[A-Za-z0-9_-]{32}$/.test(value.csrf))throw new Error('Invalid session record');
+        if(value.expires>this.now())next.set(key,value);
+      }
+      this.records=next;
+    }catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
+  }
+  persist(){
+    if(!this.file)return Promise.resolve();
+    const work=this.writing.catch(()=>{}).then(async()=>{
+      const file=this.file!,temporary=file+'.'+randomUUID()+'.next';
+      await fs.mkdir(path.dirname(file),{recursive:true,mode:0o700});
+      const handle=await fs.open(temporary,'wx',0o600);
+      try{await handle.writeFile(JSON.stringify({version:1,sessions:[...this.records]}));await handle.sync();}finally{await handle.close();}
+      await fs.rename(temporary,file);
+    });this.writing=work;return work;
+  }
   private digest(token: string) { return createHash("sha256").update(token).digest("hex"); }
   create(user: User) {
-    const now = Date.now();
-    for (const [key, value] of this.records) if (value.expires <= now || now - value.touched > 30 * 60_000) this.records.delete(key);
+    const now = this.now();
+    for (const [key, value] of this.records) if (value.expires <= now) this.records.delete(key);
     // Bound total sessions and sessions per account; oldest sessions expire first.
     for (const [key, value] of this.records) {
       if (this.records.size >= 1000 || (value.userId === user.id && [...this.records.values()].filter(v => v.userId === user.id).length >= 8)) this.records.delete(key);
     }
     const token = randomBytes(32).toString("base64url");
-    const session = { userId: user.id, revision: user.revision, csrf: randomBytes(24).toString("base64url"), expires: now + 12 * 3600_000, touched: now };
+    const session = { userId: user.id, revision: user.revision, csrf: randomBytes(24).toString("base64url"), expires: now + SESSION_LIFETIME_MS, touched: now };
     this.records.set(this.digest(token), session);
     return { token, ...session };
   }
   get(token: string, users: UserStore) {
-    const key = this.digest(token); const session = this.records.get(key); const now = Date.now();
+    const key = this.digest(token); const session = this.records.get(key); const now = this.now();
     const user = session && users.users.find(u => u.id === session.userId && u.revision === session.revision);
-    if (!session || !user || session.expires <= now || now - session.touched > 30 * 60_000) { this.records.delete(key); return null; }
+    if (!session || !user || session.expires <= now) { this.records.delete(key); return null; }
     session.touched = now;
     return { session, user, identity: { uuid: user.id, elevated: user.admin } as Identity };
   }

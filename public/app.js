@@ -33,7 +33,7 @@ function action(fn) { return async event => { event?.preventDefault();const targ
 async function api(url, body, method=body===undefined?'GET':'POST') {
   const controller=new AbortController(),requestEpoch=S.epoch,requestUser=S.user?.id; const timer=setTimeout(()=>controller.abort(),45000);
   try {
-    if(!['GET','HEAD'].includes(method)&&S.thread&&S.historyState!=='ready'&&/^\/api\/codex\/threads\//.test(url))throw new Error('任务尚未同步，请先重试读取。');
+    if(!['GET','HEAD'].includes(method)&&S.thread&&S.historyState!=='ready'&&/^\/api\/codex\/threads\//.test(url)&&!url.split('?')[0].endsWith('/sync'))throw new Error('任务尚未同步，请先重试读取。');
     const response=await (globalThis.CodexPlatform?.request || fetch)(url, {method, credentials:'same-origin', signal:controller.signal,
       headers:body===undefined?{}:{'Content-Type':'application/json','X-CSRF-Token':S.csrf}, body:body===undefined?undefined:JSON.stringify(body)});
     const data=await response.json().catch(()=>({}));
@@ -292,7 +292,7 @@ async function syncSnapshot() {
   const pending=(async()=>{
     $('stream-state').textContent='读取中…';
     try{
-      const result=await api(apiProject(`threads/${encodeURIComponent(id)}`));
+      await cached;if(epoch!==S.epoch)return;const result=await globalThis.CodexHistoryCore.sync(api,`/api/codex/threads/${encodeURIComponent(id)}/sync`,project,[...S.items.values()]);
       if(epoch!==S.epoch)return;
       if(!Array.isArray(result.items)||!Array.isArray(result.pending))throw new Error('服务器返回的任务记录格式不完整。');
       if(result.connection){S.connected=!!result.connection.connected;S.capabilities=result.connection.capabilities||S.capabilities;}

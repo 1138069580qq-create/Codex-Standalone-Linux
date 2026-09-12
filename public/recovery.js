@@ -1,18 +1,18 @@
 /* Recovery UI and read-only history. A cached task never authorizes a write. */
 (function(scope){
   'use strict';
-  let timer=null,dirty=false;
+  let timer=null,dirty=false,localDialog=null;
   const current=(epoch,project,id)=>epoch===S.epoch&&S.project?.id===project&&S.thread?.id===id;
-  function cacheError(error){S.cacheError='历史缓存未保存：'+(error?.message||'安全存储不可用');render();}
+  function cacheError(error){S.cacheError='本地记录未保存：'+(error?.message||'存储不可用，已有记录未删除');render();}
   function cacheCurrent(){
     clearTimeout(timer);timer=null;
     if(!dirty||!S.user||!S.project||!S.thread||S.historyState!=='ready')return;
     dirty=false;const epoch=S.epoch,project=S.project.id,id=S.thread.id;
-    const snapshot=scope.CodexHistoryCore.snapshot({items:[...S.items.values()],turns:S.turns,truncated:S.truncated});
+    let snapshot;try{snapshot=scope.CodexHistoryCore.snapshot({items:[...S.items.values()],turns:S.turns,truncated:S.truncated});}catch(error){if(current(epoch,project,id))cacheError(error);return Promise.resolve();}
     return scope.CodexHistory.write(project,id,snapshot).then(()=>{if(current(epoch,project,id)){S.historySavedAt=snapshot.savedAt;S.cacheError='';render();}}).catch(error=>{if(current(epoch,project,id))cacheError(error);});
   }
   function changed(){dirty=true;if(!timer)timer=setTimeout(cacheCurrent,2000);}
-  function reset(){cacheCurrent();clearTimeout(timer);timer=null;dirty=false;S.historyDenied=false;S.historyState='none';S.historyError='';S.historySavedAt=0;S.cacheError='';S.streamDiagnostic='';}
+  function reset(){if(localDialog){localDialog.close();localDialog=null;}cacheCurrent();clearTimeout(timer);timer=null;dirty=false;S.historyDenied=false;S.historyState='none';S.historyError='';S.historySavedAt=0;S.cacheError='';S.streamDiagnostic='';}
   async function restore(epoch,project,id){
     try{
       const row=await scope.CodexHistory.read(project,id);
@@ -39,6 +39,14 @@
     controls();
   }
   function disconnected(){cacheCurrent();S.streamLost=true;if(S.thread){S.historyState=S.items.size?'cached':'error';S.historyError='连接已中断';S.pending.clear();S.turnId=null;S.queueCount=0;scope.CodexQueue?.reset();renderApprovals();}controls();}
+  async function localRecords(){
+    if(!S.user||!S.project||!S.thread)return;
+    const epoch=S.epoch,project=S.project.id,id=S.thread.id;let next=null;
+    const dialog=document.createElement('dialog'),title=document.createElement('h2'),body=document.createElement('div'),older=document.createElement('button'),close=document.createElement('button');
+    localDialog=dialog;dialog.style.cssText='max-width:85vw;max-height:80vh;overflow:auto';title.textContent='本地永久记录';older.textContent='上一份已保存记录';close.textContent='关闭';close.onclick=()=>dialog.close();dialog.append(title,body,older,close);document.body.append(dialog);dialog.onclose=()=>dialog.remove();
+    async function show(recordId){const row=await scope.CodexHistory.record(project,id,recordId);if(!current(epoch,project,id)){dialog.close();return;}body.replaceChildren();if(!row){body.textContent='此对话尚未保存本地记录';older.disabled=true;return;}next=row.previousId;older.disabled=!next;for(const item of row.value.items||[]){const p=document.createElement('pre');p.style.whiteSpace='pre-wrap';p.textContent=item.text;body.append(p);}title.textContent='本地永久记录 · '+new Date(row.value.savedAt).toLocaleString();}
+    older.onclick=()=>show(next).catch(cacheError);await show();if(dialog.isConnected&&current(epoch,project,id))dialog.showModal();
+  }
   function render(){
     const connection=$('connection-recovery');if(!connection)return;
     connection.hidden=!S.user||!!S.connected&&!S.contextError&&!S.streamLost&&!S.listError;
@@ -50,8 +58,9 @@
     scope.document?.body?.classList?.toggle('history-readonly',!!S.thread&&S.historyState!=='ready');
     const state=S.historyState,hasTask=!!S.thread,visible=hasTask&&state!=='ready'||!!S.cacheError;
     $('history-status').hidden=!visible;
-    $('history-message').textContent=S.cacheError||(state==='loading'?'正在读取任务记录…':state==='cached'?'已读文字缓存 · 尚未同步'+(S.historyError?' · '+S.historyError:''):state==='error'?'记录未读取成功 · '+S.historyError:'');
+    $('history-message').textContent=S.cacheError||(state==='loading'?'正在读取任务记录…':state==='cached'?'本地记录 · 尚未同步'+(S.historyError?' · '+S.historyError:''):state==='error'?'记录未读取成功 · '+S.historyError:'');
     $('history-message').title=S.historyError||S.cacheError||'';
+    const local=$('history-local');if(local){local.hidden=!hasTask;local.onclick=()=>localRecords().catch(cacheError);}
     $('history-retry').hidden=!hasTask||state==='ready';$('history-retry').disabled=!!S.syncing||!!S.reconnecting;
     const empty=$('empty');empty.hidden=S.items.size>0;
     const title=empty.querySelector('h2'),body=empty.querySelector('p');
@@ -72,5 +81,5 @@
     })();
     S.reconnecting=work;controls();try{return await work;}finally{if(S.reconnecting===work)S.reconnecting=null;controls();}
   }
-  scope.CodexRecovery={render,reset,restore,changed,cacheCurrent,failed,disconnected,retry,cacheError};
+  scope.CodexRecovery={localRecords,render,reset,restore,changed,cacheCurrent,failed,disconnected,retry,cacheError};
 })(globalThis);
