@@ -1,4 +1,4 @@
-import {resumeThread} from './thread-resume';
+import {resumeThread,reconfigureThreadTools} from './thread-resume';
 import {setLocalTools,accountProfile,verifyAccountProfile,isolateAccountThread} from './account-isolation';
 import {STORAGE_ID,storagePath,ensureStorage} from './account-storage';
 import { IsolatedHistoryReader } from './history-reader';
@@ -339,8 +339,9 @@ export class CodexConsoleService {
     const project=this.project(identity,projectId,'send');const thread=await this.verifyThread(project,id);
     if(runtimeStatus(thread)==='running')throw new ConsoleError(409,'THREAD_BUSY','等待当前回复结束后再连接本地文件。');
     const isolated=this.config.value.accountIsolation?await accountProfile(this.config,identity,project.root,undefined,(m,p)=>this.rpc().request(m,p)):null;
-    const result=await resumeThread((m,p)=>this.rpc().request(m,p),{threadId:id,excludeTurns:true,...(isolated?{cwd:isolated.root,approvalPolicy:'never'}:{}),config:{...(isolated?.config||{}),...config}});
-    if(isolated)verifyAccountProfile(result,isolated);setLocalTools(this.config,identity,id,config);return{ok:true};
+    const slot=await this.turnGate.acquire(id);try{
+    const result=await reconfigureThreadTools((m,p)=>this.rpc().request(m,p),{threadId:id,excludeTurns:true,...(isolated?{cwd:isolated.root,approvalPolicy:'never'}:{}),config:{...(isolated?.config||{}),...config}});
+    if(isolated)verifyAccountProfile(result,isolated);setLocalTools(this.config,identity,id,config);return{ok:true};}finally{slot.finish('rejected');}
   }
   async mcp(identity: Identity, projectId: string, threadId?: string) {
     const project=this.project(identity,projectId);
