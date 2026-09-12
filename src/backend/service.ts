@@ -1,4 +1,4 @@
-import {accountProfile,verifyAccountProfile,isolateAccountThread} from './account-isolation';
+import {setLocalTools,accountProfile,verifyAccountProfile,isolateAccountThread} from './account-isolation';
 import {STORAGE_ID,storagePath,ensureStorage} from './account-storage';
 import { IsolatedHistoryReader } from './history-reader';
 import { promises as fs } from "fs";
@@ -333,6 +333,13 @@ export class CodexConsoleService {
   async extensions(identity: Identity, projectId: string, refresh = false) {
     const project=this.project(identity,projectId);
     return publicCatalog(await this.catalogFor(project.root,refresh));
+  }
+  async configureLocalTools(identity:Identity,projectId:string,id:string,config:any){
+    const project=this.project(identity,projectId,'send');const thread=await this.verifyThread(project,id);
+    if(runtimeStatus(thread)==='running')throw new ConsoleError(409,'THREAD_BUSY','等待当前回复结束后再连接本地文件。');
+    const isolated=this.config.value.accountIsolation?await accountProfile(this.config,identity,project.root,undefined,(m,p)=>this.rpc().request(m,p)):null;
+    const result=await this.rpc().request<any>('thread/resume',{threadId:id,excludeTurns:true,...(isolated?{cwd:isolated.root,approvalPolicy:'never'}:{}),config:{...(isolated?.config||{}),...config}});
+    if(isolated)verifyAccountProfile(result,isolated);setLocalTools(this.config,identity,id,config);return{ok:true};
   }
   async mcp(identity: Identity, projectId: string, threadId?: string) {
     const project=this.project(identity,projectId);

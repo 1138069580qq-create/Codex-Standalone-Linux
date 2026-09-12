@@ -58,8 +58,8 @@ test('verified Codex defaults use Sol list price, separate input/output long-con
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'webui-price-defaults-')),db=new UsageLedger(path.join(dir,'usage.sqlite'));t.after(()=>db.close());assert.equal(db.settings(admin).prices.find(p=>p.model===sol.model)?.input,5);
 });
 
-test('minor reset timestamp drift does not count the already-used percentage again',async t=>{
- const {ledger,at,tick}=await fixture(t);const reset=Math.floor(at()/1000)+604800;sample(ledger,at(),20,reset);ledger.bind('a',a,'pa',price.model,'Codex',true);tick(1000);ledger.usage('a',counters(1000000),at());tick(300000);sample(ledger,at(),22,reset+1);const stats=ledger.overview(a);assert.equal(stats.weeklyPercent,2);assert.equal(stats.subscriptionPercent,.4);assert.equal(stats.weekUsd,100);
+test('an unchanged weekly deadline accumulates only the additional usage',async t=>{
+ const {ledger,at,tick}=await fixture(t);const reset=Math.floor(at()/1000)+604800;sample(ledger,at(),20,reset);ledger.bind('a',a,'pa',price.model,'Codex',true);tick(1000);ledger.usage('a',counters(1000000),at());tick(300000);sample(ledger,at(),22,reset);const stats=ledger.overview(a);assert.equal(stats.weeklyPercent,2);assert.equal(stats.subscriptionPercent,.4);assert.equal(stats.weekUsd,100);
 });
 
 test('administrator member usage separates every account and totals cycle costs and calibrated percentages',async t=>{
@@ -112,4 +112,33 @@ test('custom dates include both boundaries and exclude other accounts and later 
  const {ledger,at,tick}=await fixture(t);ledger.bind('a',a,'pa',price.model,'visible',true);ledger.bind('b',b,'pb',price.model,'secret',true);
  const start=at();ledger.usage('a',counters(100),at());tick(1000);const end=at();ledger.usage('a',counters(200),at());ledger.usage('b',counters(900),at());tick(1);ledger.usage('a',counters(300),at());
  const d=ledger.details(a,{range:'custom',start,end});assert.equal(d.summary.requests,2);assert.equal(d.since,start);assert.equal(d.until,end);assert.equal(d.complete,true);assert.ok(!JSON.stringify(d).includes('secret'));assert.throws(()=>ledger.details(a,{range:'custom',start:end,end:start}));
+});
+test('quota corrections do not become resets and recovery does not double-count the same peak',async t=>{
+ const {ledger,at,tick}=await fixture(t);sample(ledger,at(),0);ledger.bind('correction',a,'pa',price.model,'Codex',true);
+ tick(1000);ledger.usage('correction',counters(1000000),at());tick(1000);sample(ledger,at(),60);assert.equal(ledger.overview(a).weeklyPercent,60);
+ tick(1000);sample(ledger,at(),50);tick(1000);ledger.usage('correction',counters(2000000),at());tick(1000);sample(ledger,at(),70);
+ assert.equal(ledger.overview(a).weeklyPercent,70);assert.equal(ledger.overview(a).subscriptionPercent,14);assert.equal(ledger.overview(a).quotaGap,true);
+});
+test('repeated confirmed resets retain member consumption with five-week denominator and deduplicate reset receipts',async t=>{
+ const {ledger,at,tick}=await fixture(t);sample(ledger,at(),0,2000000000);ledger.bind('resets',a,'pa',price.model,'Codex',true);let total=0;
+ for(let n=1;n<=3;n++){
+  tick(1000);ledger.usage('resets',counters(n*1000000),at());tick(1000);sample(ledger,at(),50,2000000000+(n-1)*604800);total+=50;
+  tick(1000);const result={outcome:'reset',rateLimits:normalizeRateLimits({rateLimits:{secondary:{windowDurationMins:10080,usedPercent:0,resetsAt:2000000000+n*604800}}},at())};
+  ledger.recordReset(admin,'reset-request-'+n,'card-'+n,result);ledger.recordReset(admin,'reset-request-'+n,'card-'+n,result);
+  assert.equal(ledger.overview(a).weeklyPercent,total);assert.equal(ledger.overview(a).subscriptionPercent,total/5);assert.equal(ledger.overview(a).weeksPerCycle,5);
+ }
+ assert.equal(ledger.overview(a).subscriptionPercent!/100*650,195);
+});
+test('legacy quota migration corrects false reset deltas while preserving raw samples and restart high-water state',async t=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'quota-migration-')),file=path.join(dir,'usage.sqlite');const {DatabaseSync}=await import('node:sqlite');const db=new DatabaseSync(file);
+ db.exec('CREATE TABLE quota (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,bucket TEXT NOT NULL,reset_at INTEGER,used REAL NOT NULL,delta REAL NOT NULL,gap INTEGER NOT NULL)');
+ const ins=db.prepare('INSERT INTO quota VALUES(?,?,?,?,?,?,?)');for(const [id,used,delta]of [[1,40,0],[2,60,20],[3,50,50],[4,70,20]])ins.run(id,id*1000,'codex',2000000000,used,delta,0);db.close();
+ const ledger=new UsageLedger(file,()=>10000);ledger.close();const check=new DatabaseSync(file);assert.deepEqual(check.prepare('SELECT used,delta,highwater FROM quota ORDER BY id').all().map((x:any)=>[x.used,x.delta,x.highwater]),[[40,0,40],[60,20,60],[50,0,60],[70,10,70]]);check.close();
+ const reopened=new UsageLedger(file,()=>10000);reopened.close();
+});
+test('a new weekly deadline identifies a reset even if the new used percentage exceeds the prior window',async t=>{
+ const {ledger,at,tick}=await fixture(t),end=2000000000;sample(ledger,at(),0,end);ledger.bind('deadline',a,'pa',price.model,'Codex',true);
+ tick(1000);ledger.usage('deadline',counters(1000000),at());tick(1000);sample(ledger,at(),20,end);
+ tick(1000);ledger.usage('deadline',counters(2000000),at());tick(1000);sample(ledger,at(),30,end+604800);
+ assert.equal(ledger.overview(a).weeklyPercent,50);assert.equal(ledger.overview(a).subscriptionPercent,10);
 });

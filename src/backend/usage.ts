@@ -62,6 +62,15 @@ export class UsageLedger {
       'CREATE TABLE IF NOT EXISTS quota (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,bucket TEXT NOT NULL,reset_at INTEGER,used REAL NOT NULL,delta REAL NOT NULL,gap INTEGER NOT NULL);'
     );
     if(!(this.db.prepare('PRAGMA table_info(threads)').all() as any[]).some(c=>c.name==='service_tier'))this.db.exec('ALTER TABLE threads ADD COLUMN service_tier TEXT');
+    this.db.exec('CREATE TABLE IF NOT EXISTS quota_resets (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,credit_id TEXT,outcome TEXT NOT NULL,at INTEGER NOT NULL)');
+    if(!(this.db.prepare('PRAGMA table_info(quota)').all() as any[]).some(c=>c.name==='highwater')){
+      this.db.exec('BEGIN IMMEDIATE');
+      this.db.exec('ALTER TABLE quota ADD COLUMN highwater REAL');
+      // Recompute only derived deltas. Keep raw historical samples for audit.
+      const rows=this.db.prepare('SELECT * FROM quota ORDER BY id').all() as any[];let previous:any;
+      const update=this.db.prepare('UPDATE quota SET delta=?,gap=?,highwater=? WHERE id=?');
+      try{for(const row of rows){const v=this.quotaDelta(previous,row.bucket,row.used,row.reset_at,row.at,false);update.run(v.delta,Math.max(row.gap,v.gap),v.highwater,row.id);previous={...row,...v};}this.db.exec('COMMIT');}catch(e){this.db.exec('ROLLBACK');throw e;}
+    }
     this.startedAt=this.getMeta('startedAt')??this.clock();this.setMeta('startedAt',this.startedAt);
     if(this.getMeta('cycle')?.source!=='account/read')this.setMeta('cycle',{start:this.startedAt,end:null,configured:false,source:'account/read',status:'unavailable',reason:'not-fetched',planType:null,fetchedAt:null});
     let stored=this.getMeta('prices');if(stored===null){stored=defaultCodexPrices();this.setMeta('prices',stored);}
@@ -132,6 +141,22 @@ export class UsageLedger {
     const completed=this.db.prepare("SELECT COALESCE(SUM(r.output),0) output FROM requests r JOIN turns t ON t.thread_id=r.thread_id AND t.id=r.turn_id WHERE r.thread_id=? AND r.user_id=? AND t.ended IS NOT NULL").get(threadId,who.uuid) as any;
     return {...tokens,...times,cacheHitPercent:tokens.input?tokens.cached/tokens.input*100:null,tokensPerSecond:times.generationMs>0?completed.output/(times.generationMs/1000):null,timing:'observed-turn-wall-clock',since:this.startedAt};
   }
+  private quotaDelta(last:any,bucket:string,used:number,reset:number|null,at:number,confirmed:boolean){
+    if(!last||bucket!==last.bucket)return{delta:0,gap:last?1:0,highwater:used};
+    const peak=last.highwater??last.used;
+    // The weekly deadline is the authoritative window id; never infer a reset from usage alone.
+    const advanced=!!(last.reset_at&&reset&&reset>last.reset_at);
+    const resetWindow=advanced;
+    if(resetWindow)return{delta:used,gap:confirmed?0:1,highwater:used};
+    // A lower reading without reset evidence is a correction, not a fresh allowance.
+    return{delta:Math.max(0,used-peak),gap:used<last.used||advanced?1:0,highwater:Math.max(peak,used)};
+  }
+  recordReset(who:Identity,requestId:string,creditId:string|undefined,result:any){
+    requireAdmin(who);const key=who.uuid+':'+requestId;
+    const row=this.db.prepare('INSERT OR IGNORE INTO quota_resets(id,user_id,credit_id,outcome,at) VALUES(?,?,?,?,?)').run(key,who.uuid,creditId??null,String(result.outcome),this.clock());
+    if(row.changes&&result.outcome==='reset')this.setMeta('pendingQuotaReset',true);
+    if(result.rateLimits)this.sample(result.rateLimits);
+  }
   sample(limits:CodexRateLimits){
     const candidates=limits.windows.filter(w=>w.windowDurationMins===10080),main=candidates.filter(w=>w.bucketId==='codex');
     const choices=main.length?main:candidates;
@@ -139,14 +164,10 @@ export class UsageLedger {
     const w=choices[0],at=limits.fetchedAt,bucket=w.bucketId||w.id;
     const last=this.db.prepare('SELECT * FROM quota ORDER BY id DESC LIMIT 1').get() as any;
     if(last&&at<=last.at)return;
-    let delta=0,gap=0;
-    if(last){
-      if(bucket!==last.bucket)gap=1;
-      else if(w.usedPercent<last.used||(last.reset_at&&at>=last.reset_at*1000&&w.resetsAt&&w.resetsAt>last.reset_at+60)){delta=w.usedPercent;gap=1;}
-      else {delta=w.usedPercent-last.used;if(last.reset_at&&w.resetsAt&&Math.abs(w.resetsAt-last.reset_at)>60)gap=1;}
-    }
-    this.db.prepare('INSERT INTO quota(at,bucket,reset_at,used,delta,gap) VALUES (?,?,?,?,?,?)').run(at,bucket,w.resetsAt??null,w.usedPercent,delta,gap);
-    this.setMeta('quotaUnavailable',null);this.setMeta('limits',limits);
+    const confirmed=this.getMeta('pendingQuotaReset')===true,v=this.quotaDelta(last,bucket,w.usedPercent,w.resetsAt??null,at,confirmed);
+    this.db.prepare('INSERT INTO quota(at,bucket,reset_at,used,delta,gap,highwater) VALUES (?,?,?,?,?,?,?)').run(at,bucket,w.resetsAt??null,w.usedPercent,v.delta,v.gap,v.highwater);
+    if(confirmed&&(!last||w.resetsAt&&last.reset_at&&w.resetsAt>last.reset_at))this.setMeta('pendingQuotaReset',false);
+    this.setMeta('quotaUnavailable',null);this.setMeta('limits',limits);this.cache.clear();this.sharedEstimate=undefined;
   }
   syncSubscription(info:AccountSubscription){
     if(info.source!=='account/read')return;

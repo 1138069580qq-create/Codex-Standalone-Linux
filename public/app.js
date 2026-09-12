@@ -53,7 +53,13 @@ const apiProject = (route, extra={}) => `/api/codex/${route}?${q({projectId:S.pr
 function permission(name) { return !!S.project?.permissions?.[name]; }
 function closeStream() { clearTimeout(S.streamStableTimer);S.streamStableTimer=null; clearTimeout(S.timer); S.timer=null; S.stream?.close(); S.stream=null; }
 function clearConversation() { globalThis.CodexRecovery?.reset(); globalThis.CodexFeatures?.reset(); globalThis.CodexQueue?.reset();S.turnId=null;S.turns=[];S.queueCount=0;globalThis.CodexUsage?.metrics(null); clearTimeout(S.creationTimer);S.creationTimer=null;S.newTask=false;S.newTaskConfirmed=false;S.modelRequest=null;S.modelsUnavailable=false;S.taskCreation=null;S.epoch++; closeStream(); if(!S.sideOrigin)$('side-context').hidden=true; clearTimeout(S.renderTimer); S.renderTimer=null; S.thread=null; S.items.clear(); S.pending.clear(); S.nodes.clear(); S.cursor=''; S.status='idle'; S.attachments=[]; S.attempt=null; S.creationId=null; S.syncing=null; S.truncated=false; $('timeline').replaceChildren($('empty')); $('empty').hidden=false; $('approvals').replaceChildren(); $('thread-title').textContent='新任务'; S.selected=[]; S.references=[]; S.goalDraft=''; S.accessConfirmed=false; S.tokenUsage=null; S.threadSettings=null; S.settingsOverrides={}; $('access').value='default'; closeMenu(); $('prompt').value=''; renderAttachments(); controls(); }
-function loggedOut() { S.authRevision++;globalThis.CodexAccountFiles?.reset();globalThis.CodexRecovery?.cacheCurrent();globalThis.CodexHistory?.reset();S.contextError='';S.listError='';S.streamLost=false;globalThis.CodexPlatform?.clearSession(); globalThis.CodexUsage?.reset(); S.sideOrigin=null;$('side-context').hidden=true;$('side-history').replaceChildren();clearConversation(); S.user=null; S.csrf=''; S.connected=false; S.attachedThreadId=null; S.capabilities={}; S.projects=[]; S.threads=[]; S.project=null; S.models=[]; S.items.clear(); $('workspace').hidden=true; $('login-view').hidden=false; $('settings-dialog').close(); $('new-thread-dialog').close(); for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close(); setAuthMode('login'); S.catalog=null; }
+function clearAdminView(){
+ for(const id of ['users-list','registration-list','admin-members','candidates'])document.getElementById(id)?.replaceChildren();
+ for(const id of ['config-form','user-form'])document.getElementById(id)?.reset();
+ for(const id of ['projects-json','endpoint','token-env','edit-user-id','new-username','new-password']){const field=document.getElementById(id);if(field)field.value='';}
+ const checkbox=document.getElementById('new-admin');if(checkbox)checkbox.checked=false;
+}
+function loggedOut() { clearAdminView();S.authRevision++;globalThis.CodexAccountFiles?.reset();globalThis.CodexRecovery?.cacheCurrent();globalThis.CodexHistory?.reset();S.contextError='';S.listError='';S.streamLost=false;globalThis.CodexPlatform?.clearSession(); globalThis.CodexUsage?.reset(); S.sideOrigin=null;$('side-context').hidden=true;$('side-history').replaceChildren();clearConversation(); S.user=null; S.csrf=''; S.connected=false; S.attachedThreadId=null; S.capabilities={}; S.projects=[]; S.threads=[]; S.project=null; S.models=[]; S.items.clear(); $('workspace').hidden=true; $('login-view').hidden=false; $('settings-dialog').close(); $('new-thread-dialog').close(); for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close(); setAuthMode('login'); S.catalog=null; }
 function supports(capability) {
   if(capability==='createThread' && S.attachedThreadId)return false;
   return S.capabilities?.[capability]!==false;
@@ -539,6 +545,7 @@ function renderQuota(limits){
     const bar=el('progress');bar.max=100;bar.value=remaining;bar.setAttribute('aria-label',`${label} 剩余 ${remaining}%`);
     box.append(head,bar,el('p',`剩余${window.resetsAt?' · '+shortDate(window.resetsAt)+' 重置':''}`,'footnote'));container.append(box);
   }
+  if(!S.user?.admin)return;
   const credits=limits.resetCredits;
   if(!credits){container.append(el('p','未提供重置卡数据','footnote'));return;}
   const rows=(credits.availableCount>0?credits.details:[]).filter(c=>(!c.status||c.status==='available')&&(c.expiresAt==null||c.expiresAt*1000>Date.now()));

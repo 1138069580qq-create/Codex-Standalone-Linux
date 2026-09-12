@@ -1,4 +1,5 @@
 import Koa from "koa";
+import {LocalDevices} from "./local-devices";
 import Router from "@koa/router";
 import bodyParser from "koa-bodyparser";
 import { promises as fs } from "node:fs";
@@ -36,6 +37,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
   let authInFlight = 0; let parsing = 0;
   const token = (ctx: Koa.Context) => ctx.cookies.get(cookieName, { signed: false }) || "";
   const current = (ctx: Koa.Context) => sessions.get(token(ctx), users);
+  const devices=new LocalDevices();
   const routes = await createCodexRoutes(config, options.origin, ctx => current(ctx)?.identity || null, serviceFactory, () => users.users.map(publicUser), id=>{const user=users.users.find(u=>u.id===id);return user?{uuid:user.id,elevated:user.admin}:null;});
   function setCookie(ctx: Koa.Context, value: string, maxAge: number) {
     // TLS may terminate at the configured reverse proxy. Origin is startup-validated.
@@ -68,6 +70,15 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
         ctx.body = await zip(data); ctx.set("Content-Encoding", "gzip");
       } else ctx.body = data;
     }
+  });
+  app.use(async(ctx,next)=>{
+    if(ctx.path!=='/api/local-tools/mcp')return next();
+    if(ctx.method!=='POST'){ctx.status=405;return;}
+    if(ctx.get('origin')||!/^Bearer [A-Za-z0-9_-]{43}$/.test(ctx.get('authorization')))throw new ConsoleError(403,'MCP_DENIED','Dedicated local-tool authorization required.');
+    limiter.take('local-mcp:'+ctx.ip,600,60000);
+    if(!ctx.is('application/json'))throw new ConsoleError(415,'JSON_REQUIRED','Send application/json.');
+    const body=await readBounded(ctx.req,256*1024);let rpc:any;try{rpc=JSON.parse(body.toString());}catch{throw new ConsoleError(400,'INVALID_RPC','Invalid JSON.');}
+    const result=await devices.mcp(ctx.get('authorization').slice(7),rpc);if(result===undefined){ctx.status=202;return;}ctx.body=result;
   });
   app.use(async (ctx, next) => {
     if (!ctx.path.startsWith("/api/")) return next();
@@ -107,6 +118,18 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
     await next();
   });
   const auth = new Router();
+  auth.post('/api/codex/local-devices',async ctx=>{
+    const active=current(ctx)!,b=ctx.request.body as any,session=token(ctx);
+    if(!b||typeof b.projectId!=='string'||typeof b.threadId!=='string'||typeof b.deviceId!=='string')throw new ConsoleError(400,'INVALID_DEVICE','Choose the current task.');
+    await routes.service.snapshot(active.identity,b.projectId,b.threadId);
+    const pair=devices.create(active.user.id,session,b.threadId,b.deviceId,b.tools,()=>!!sessions.get(session,users));
+    try{await routes.service.configureLocalTools(active.identity,b.projectId,b.threadId,{'mcp_servers.local_files':{url:`http://127.0.0.1:${options.port}/api/local-tools/mcp`,http_headers:{Authorization:'Bearer '+pair.token},tool_timeout_sec:115,enabled_tools:b.tools.map((t:any)=>t.name),tools:Object.fromEntries(b.tools.map((t:any)=>[t.name,{approval_mode:'approve'}]))}});}
+    catch(e){devices.remove(pair.binding.bindingId,session);throw e;}
+    ctx.body={binding:pair.binding};
+  });
+  auth.post('/api/codex/local-devices/:id/poll',async ctx=>{ctx.body=await devices.poll(ctx.params.id,token(ctx));});
+  auth.post('/api/codex/local-devices/:id/reply',ctx=>{const b=ctx.request.body as any;ctx.body=devices.reply(ctx.params.id,token(ctx),b?.id,b?.result);});
+  auth.post('/api/codex/local-devices/:id/disconnect',ctx=>{ctx.body=devices.remove(ctx.params.id,token(ctx));});
   auth.get("/api/session", ctx => {
     const active = current(ctx);
     if (!active) throw new ConsoleError(401, "LOGIN_REQUIRED", "Sign in first.");
@@ -176,7 +199,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
     if (encoding === "br" || encoding === "gzip") { ctx.body = asset[encoding]; ctx.set("Content-Encoding", encoding); }
     else ctx.body = asset.raw;
   });
-  return { app, config, users, service: routes.service, close: routes.close };
+  return { app, config, users, service: routes.service, close: ()=>{devices.close();routes.close();} };
 }
 async function main() {
   const opts = settings(); const runtime = await createApp(opts);

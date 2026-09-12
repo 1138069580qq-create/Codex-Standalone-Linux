@@ -219,8 +219,9 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
     wrap(async (c, who) => {
       requireAdmin(who);rateLimit(who,"quota-reset",3);
       const b = body(c);
+      try{usage.sample(await service.rateLimits(who));}catch{/* Missing pre-reset sampling stays an explicit observation gap. */}
       const result=await service.consumeRateLimitReset(who,b.requestId,b.creditId);
-      if(result.rateLimits)usage.sample(result.rateLimits);
+      usage.recordReset(who,b.requestId,b.creditId,result);
       sampledAt=0;return result;
     })
   );
