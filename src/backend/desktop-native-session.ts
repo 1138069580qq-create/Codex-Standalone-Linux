@@ -1,3 +1,4 @@
+import { readThreadHistory } from './history';
 import {DesktopIpc} from './desktop-ipc';
 import type {DesktopBridgeApi} from './desktop-bridge';
 import {ConsoleError} from './config';
@@ -16,7 +17,7 @@ export class DesktopNativeSession extends DesktopIpc {
       await this.refresh();this.connected=true;this.ownerId='existing-desktop-backend';this.loading=false;for(const event of this.queued)this.reduce(event);this.queued=[];this.emit('state',this.state);
     }catch(error){this.loading=false;this.close();throw error;}
   }
-  override async refresh(){const history=await this.bridge.rpc('thread/turns/list',{threadId:this.threadId,limit:20,sortDirection:'desc',itemsView:'full'});this.state.turns=[...(history.data||[])].reverse().map((t:any)=>({...t,turnId:t.id,items:(t.items||[]).filter((i:any)=>i.type!=='reasoning')}));this.trim();this.emit('state',this.state);}
+  override async refresh(){const history=await readThreadHistory((method,params)=>this.bridge.rpc(method,params),this.threadId);this.state.turns=[...(history.data||[])].reverse().map((t:any)=>({...t,turnId:t.id,items:(t.items||[]).filter((i:any)=>i.type!=='reasoning')}));this.trim();this.emit('state',this.state);}
   private trim(){let chars=0,count=0;this.state.turns=this.state.turns.slice(-20);for(const t of [...this.state.turns].reverse()){const kept=[];for(const item of [...(t.items||[])].reverse()){const size=JSON.stringify(item).length;if(count>=200||chars+size>600*1024)continue;count++;chars+=size;kept.unshift(item);}t.items=kept;}}
   private reduce(event:any){const p=event.params||{},state=this.state;if(!state)return;const turns=state.turns;
     const turn=(id:string)=>{let t=turns.find((t:any)=>t.id===id);if(!t){t={id,turnId:id,status:'inProgress',items:[]};turns.push(t);}return t;};

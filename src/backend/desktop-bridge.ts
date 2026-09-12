@@ -1,3 +1,4 @@
+import { CodexRpcError } from './transport';
 import WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
 import { ConsoleError } from './config';
@@ -11,7 +12,7 @@ export interface DesktopBridgeApi {
   watch?(threadId:string,listener:(event:any)=>void):Promise<()=>void>;
   close():void;
 }
-const rpcMethods=new Set(['account/read','skills/list','plugin/installed','mcpServerStatus/list','account/rateLimits/read','account/rateLimitResetCredit/consume','project/list','thread/metadata/update','turn/start','turn/steer','turn/interrupt','thread/compact/start','thread/start','thread/resume','thread/read','thread/list','thread/turns/list','thread/goal/get','thread/goal/set','thread/name/set','thread/archive','thread/fork','review/start','feedback/upload']);
+const rpcMethods=new Set(['config/read','account/read','skills/list','plugin/installed','mcpServerStatus/list','account/rateLimits/read','account/rateLimitResetCredit/consume','project/list','thread/metadata/update','turn/start','turn/steer','turn/interrupt','thread/compact/start','thread/start','thread/resume','thread/read','thread/list','thread/turns/list','thread/goal/get','thread/goal/set','thread/name/set','thread/archive','thread/fork','review/start','feedback/upload']);
 const hostRoutes=new Set(['get-global-state','projectless-thread-cwd','projectless-workspace-root','set-thread-pinned','list-pinned-threads']);
 /** Opt-in attachment to the existing desktop's local debug endpoint. No browser/Codex process launch.
  * The HTTP service never accepts JavaScript, CDP methods, or arbitrary host routes from a client.
@@ -65,7 +66,8 @@ export class DesktopBridge implements DesktopBridgeApi {
     if(!this.available)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','桌面功能接口未连接。');
     const request={kind,method,params,id:'webui-'+randomUUID()};
     // Listen only for this request's public response, never inspect unrelated messages or credentials.
-    const reply=await this.evaluate(`(async()=>{const r=${JSON.stringify(request)};return await new Promise((resolve)=>{let timer;const finish=value=>{clearTimeout(timer);window.removeEventListener('message',receive);resolve(value)};const receive=event=>{if(event.source!==window&&event.source!==null)return;const m=event.data;if(r.kind==='rpc'&&m?.type==='mcp-response'&&m.hostId==='local'&&m.message?.id===r.id)finish(m.message.error?{ok:false}:{ok:true,value:m.message.result});if(r.kind==='host'&&m?.type==='fetch-response'&&m.requestId===r.id){if(m.responseType!=='success'||m.status<200||m.status>=300)return finish({ok:false});try{finish({ok:true,value:'body' in m?m.body:JSON.parse(m.bodyJsonString)})}catch{finish({ok:false})}}};window.addEventListener('message',receive);timer=setTimeout(()=>finish({ok:false,unknown:true}),30000);const message=r.kind==='rpc'?{type:'mcp-request',hostId:'local',request:{id:r.id,method:r.method,params:r.params}}:{type:'fetch',requestId:r.id,method:'POST',url:'vscode://codex/'+r.method,body:JSON.stringify(r.params)};Promise.resolve(window.electronBridge.sendMessageFromView(message)).catch(()=>finish({ok:false}));});})()`);
+    const reply=await this.evaluate(`(async()=>{const r=${JSON.stringify(request)};return await new Promise((resolve)=>{let timer;const finish=value=>{clearTimeout(timer);window.removeEventListener('message',receive);resolve(value)};const receive=event=>{if(event.source!==window&&event.source!==null)return;const m=event.data;if(r.kind==='rpc'&&m?.type==='mcp-response'&&m.hostId==='local'&&m.message?.id===r.id)finish(m.message.error?{ok:false,rpcCode:Number.isInteger(m.message.error.code)?m.message.error.code:null}:{ok:true,value:m.message.result});if(r.kind==='host'&&m?.type==='fetch-response'&&m.requestId===r.id){if(m.responseType!=='success'||m.status<200||m.status>=300)return finish({ok:false});try{finish({ok:true,value:'body' in m?m.body:JSON.parse(m.bodyJsonString)})}catch{finish({ok:false})}}};window.addEventListener('message',receive);timer=setTimeout(()=>finish({ok:false,unknown:true}),30000);const message=r.kind==='rpc'?{type:'mcp-request',hostId:'local',request:{id:r.id,method:r.method,params:r.params}}:{type:'fetch',requestId:r.id,method:'POST',url:'vscode://codex/'+r.method,body:JSON.stringify(r.params)};Promise.resolve(window.electronBridge.sendMessageFromView(message)).catch(()=>finish({ok:false}));});})()`);
+    if(kind==='rpc'&&!reply?.ok&&Number.isInteger(reply?.rpcCode))throw new CodexRpcError(reply.rpcCode,'Desktop RPC request rejected');
     if(!reply?.ok)throw new ConsoleError(reply?.unknown?504:502,reply?.unknown?'DESKTOP_OUTCOME_UNKNOWN':'DESKTOP_BRIDGE_REJECTED',reply?.unknown?'桌面操作超时，结果未知；请检查桌面，不要重复提交。':'桌面未能完成此操作。');
     return reply.value;
   }

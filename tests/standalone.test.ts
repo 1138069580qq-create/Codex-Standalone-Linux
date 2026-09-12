@@ -83,3 +83,9 @@ test("production HTTP: auth, CSRF, origin, ACL, static compression, ETag, no sec
   response=await call('/users.json');assert.equal(response.status,404);
   response=await call('/healthz');assert.deepEqual(await response.json(),{ok:true});
 });
+
+test('TLS-terminated login issues a host-only secure cookie and private responses cannot be cached',async t=>{
+ const dataDir=await mkdtemp(path.join(os.tmpdir(),'webui-https-'));const users=new UserStore(path.join(dataDir,'users.json'));await users.upsert({username:'tls-user',password:'synthetic-tls-password',admin:true});
+ const runtime=await createApp({host:'127.0.0.1',port:0,origin:'https://xf.csituka.top',secureCookies:true,dataDir});const server=runtime.app.listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));t.after(async()=>{runtime.close();server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));});
+ const base='http://127.0.0.1:'+(server.address() as any).port;const login=await fetch(base+'/api/login',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://xf.csituka.top'},body:JSON.stringify({username:'tls-user',password:'synthetic-tls-password'})});assert.equal(login.status,200);const cookie=login.headers.get('set-cookie')||'';assert.match(cookie,/^__Host-codex_webui=/);assert.match(cookie,/; secure/i);assert.match(cookie,/; httponly/i);assert.match(cookie,/; samesite=strict/i);assert.match(cookie,/; path=\//i);assert.doesNotMatch(cookie,/; domain=/i);assert.equal(login.headers.get('cache-control'),'no-store');const session=await fetch(base+'/api/session',{headers:{cookie:cookie.split(';')[0]}});assert.equal(session.status,200);assert.equal(session.headers.get('cache-control'),'no-store');
+});

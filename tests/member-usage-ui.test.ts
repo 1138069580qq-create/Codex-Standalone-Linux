@@ -36,7 +36,7 @@ test('personal sidebar retains consumed dollars and divides weekly usage by five
  const summary={total:{cost:7.5,unpriced:0},cycle:{configured:true},weeklyPercent:100,subscriptionPercent:999,cycleUsd:999999,limits:{windows:[{windowDurationMins:10080,usedPercent:60}]},generatedAt:1};
  const c:any=vm.createContext({S:{user:{id:'member'}},U:{summary,interval:5},$: (id:string)=>nodes[id]??=el('div'),el,metric:(label:string,value:string)=>Object.assign(el('metric'),{label,value}),cost:(v:any)=>'$'+v.cost.toFixed(4),action:(fn:any)=>fn,open:()=>{},date:String,shortDate:String,cycleMessage:()=> '未获取套餐日期'});
  vm.runInContext(source.slice(source.indexOf('  function renderSummary(){'),source.indexOf('  function metrics(m){')),c);vm.runInContext('renderSummary()',c);
- const text=JSON.stringify(nodes);assert.match(text,/7.5000/);assert.match(text,/20.00%/);assert.match(text,/40.0%/);assert.doesNotMatch(text,/999.00%|999999/);
+ const text=JSON.stringify(nodes);assert.match(text,/7.5000/);assert.match(text,/20.00%/);assert.match(text,/¥130.00/);assert.match(text,/40.0%/);assert.doesNotMatch(text,/999.00%|999999/);
  summary.cycle.configured=false;vm.runInContext('renderSummary()',c);assert.match(JSON.stringify(nodes),/待估算/);
 });
 

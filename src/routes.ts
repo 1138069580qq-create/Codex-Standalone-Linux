@@ -1,3 +1,6 @@
+import {STORAGE_ID,ensureStorage} from './backend/account-storage';
+import {randomUUID} from 'node:crypto';
+import {publicBackendError} from './backend/errors';
 import path from "node:path";
 import { installFileRoutes } from "./file-routes";
 import { PassThrough } from "node:stream";
@@ -79,24 +82,9 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
         const result = await handler(c, who);
         if (result !== undefined) c.body = result;
       } catch (error) {
-        const known = error instanceof ConsoleError;
-        c.status = known ? error.status : 502;
-        // Koa's outer protocol leaves non-200 object bodies intact.
-        c.body = {
-          status: c.status,
-          data: {
-            code: known ? error.code : "BACKEND_ERROR",
-            message: known
-              ? error.message
-              : "Codex operation failed. Verify its connection, login and project configuration."
-          },
-          time: Date.now()
-        };
-        if (!known)
-          console.warn(
-            "Codex operation failed (%s); request bodies and upstream errors omitted.",
-            c.path
-          );
+        const info=publicBackendError(error),requestId=randomUUID();c.status=info.status;
+        c.body={status:c.status,data:{...info,requestId},time:Date.now()};
+        if(!(error instanceof ConsoleError))console.warn('Codex operation failed %s',JSON.stringify({requestId,code:info.code,rpcCode:'rpcCode' in info?info.rpcCode:undefined}));
       }
     };
   }
@@ -115,6 +103,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
   }
   async function root(who: Identity, projectId: string, capability: "view" | "files") {
     const p = service.project(who, projectId, capability);
+    if(projectId===STORAGE_ID){if(!config.value.accountIsolation)throw new ConsoleError(503,"STORAGE_ISOLATION_REQUIRED","服务器尚未启用账号隔离文件库。");await ensureStorage(config.file,who);}
     if (!config.value.enabled)
       throw new ConsoleError(409, "DISABLED", "Codex console is disabled.");
     if ((await fs.realpath(p.root).catch(() => "")) !== p.root)
@@ -148,7 +137,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
   router.put("/threads/:id/goal",wrap((c,who)=>{ const b=body(c); return service.goal(who,b.projectId,c.params.id,b.objective); }));
   router.get(
     "/threads",
-    wrap((c, who) => service.listThreads(who, param(c, "projectId", 64), param(c, "cursor")))
+    wrap(async(c,who)=>{const projectId=param(c,"projectId",64);await recoverReadConnection(who,projectId);const result=await service.listThreads(who,projectId,param(c,"cursor"));return {...result,connection:service.status(who)};})
   );
   router.post(
     "/threads",
@@ -217,7 +206,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
   );
   router.get("/account/usage",wrap(async(_c,who)=>{await sampleQuota(who);return usage.overview(who);}));
   router.get("/account/usage/members",wrap(async(_c,who)=>{requireAdmin(who);rateLimit(who,"usage-members",12);await sampleQuota(who);return usage.memberOverview(who,listMembers());}));
-  router.get("/account/usage/details",wrap((c,who)=>{rateLimit(who,"usage-details",12);const range=param(c,"range",8)||"today",before=Number(param(c,"before",20))||undefined,offsetMinutes=Number(param(c,"offset",6))||0;if(!["today","7d","30d","all"].includes(range)||before!==undefined&&(!Number.isSafeInteger(before)||before<1)||!Number.isInteger(offsetMinutes)||Math.abs(offsetMinutes)>840)throw new ConsoleError(400,"INVALID_USAGE_FILTER","统计筛选条件无效。");return usage.details(who,{range,before,offsetMinutes,model:param(c,"model",128)||undefined,provider:param(c,"provider",128)||undefined});}));
+  router.get("/account/usage/details",wrap((c,who)=>{rateLimit(who,"usage-details",12);const range=param(c,"range",8)||"today",before=Number(param(c,"before",20))||undefined,offsetMinutes=Number(param(c,"offset",6))||0;if(!["today","yesterday","month","7d","30d","all","custom"].includes(range)||before!==undefined&&(!Number.isSafeInteger(before)||before<1)||!Number.isInteger(offsetMinutes)||Math.abs(offsetMinutes)>840)throw new ConsoleError(400,"INVALID_USAGE_FILTER","统计筛选条件无效。");const start=param(c,'start',20),end=param(c,'end',20);if(range==='custom'&&(!start||!end||!Number.isSafeInteger(Number(start))||!Number.isSafeInteger(Number(end))||Number(start)<0||Number(end)<Number(start)))throw new ConsoleError(400,'INVALID_USAGE_FILTER','统计日期无效。');return usage.details(who,{range,before,offsetMinutes,...(range==='custom'?{start:Number(start),end:Number(end)}:{}),model:param(c,"model",128)||undefined,provider:param(c,"provider",128)||undefined});}));
   router.get("/account/usage/records/:id",wrap((c,who)=>{const id=Number(c.params.id);if(!Number.isSafeInteger(id)||id<1)throw new ConsoleError(400,"INVALID_USAGE_ID","无效的记录 ID。");return usage.detail(who,id);}));
   router.get("/account/usage/settings",wrap((_c,who)=>usage.settings(who)));
   router.put("/account/usage/settings",wrap((c,who)=>{rateLimit(who,"usage-settings",3);return usage.configure(who,body(c));}));

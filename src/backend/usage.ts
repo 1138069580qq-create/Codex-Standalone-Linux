@@ -228,18 +228,20 @@ export class UsageLedger {
     if(showObserved){total.observedWeeklyPercent=rows.reduce((sum,row)=>sum+row.observedWeeklyPercent!,0);total.observedSubscriptionPercent=total.observedWeeklyPercent/weeksPerCycle;}
     return {generatedAt:snapshot.generatedAt,cycle,calibration,weeksPerCycle,cycleCapacityPercent:100,estimate:true,pricingComplete:all.unpriced===0,quotaGap:snapshot.quotaGap,members:rows,total};
   }
-  details(who:Identity,input:{range?:string;model?:string;provider?:string;before?:number;offsetMinutes?:number}={}){
+  details(who:Identity,input:{range?:string;model?:string;provider?:string;before?:number;offsetMinutes?:number;start?:number;end?:number}={}){
     const now=this.clock(),offset=Math.max(-840,Math.min(840,input.offsetMinutes||0))*60000;
     const today=Math.floor((now+offset)/86400000)*86400000-offset;
-    const since=input.range==='all'?0:input.range==='30d'?today-29*86400000:input.range==='7d'?today-6*86400000:today;
-    const args:any[]=[who.uuid,since];let where='user_id=? AND at>=?';
+    const since=input.range==='custom'?input.start!:input.range==='yesterday'?today-86400000:input.range==='month'?Date.UTC(new Date(now+offset).getUTCFullYear(),new Date(now+offset).getUTCMonth(),1)-offset:input.range==='all'?0:input.range==='30d'?today-29*86400000:input.range==='7d'?today-6*86400000:today;
+    const until=input.range==='custom'?input.end!:input.range==='yesterday'?today-1:now;
+    if(!Number.isSafeInteger(since)||!Number.isSafeInteger(until)||since<0||until<since)throw new ConsoleError(400,'INVALID_USAGE_FILTER','统计日期无效。');
+    const args:any[]=[who.uuid,since];let where='user_id=? AND at>=?';if(input.range==='custom'||input.range==='yesterday'){where+=' AND at<=?';args.push(until);}
     for(const k of ['model','provider'] as const)if(input[k]){where+=' AND '+k+'=?';args.push(input[k]);}
     const summary=this.sum(where,args,'requests');
     const rows=this.db.prepare('SELECT id,thread_id threadId,turn_id turnId,model,provider,at,input,cached,output,cost,status,(SELECT ended-started FROM turns t WHERE t.thread_id=requests.thread_id AND t.id=requests.turn_id) durationMs,(SELECT first_token-started FROM turns t WHERE t.thread_id=requests.thread_id AND t.id=requests.turn_id) ttftMs FROM requests WHERE '+where+(input.before?' AND id<?':'')+' ORDER BY id DESC LIMIT 51').all(...args,...(input.before?[input.before]:[]));
     const group=(key:string)=>this.db.prepare('SELECT '+key+',COUNT(*) requests,SUM(input) input,SUM(cached) cached,SUM(output) output,SUM(cost) cost,SUM(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced FROM requests WHERE '+where+' GROUP BY '+key+' ORDER BY COALESCE(SUM(cost),0) DESC LIMIT 300').all(...args);
-    const bucket=input.range==='today'||!input.range?3600000:86400000;
+    const bucket=until-since<86400000?3600000:86400000;
     const trend=this.db.prepare('SELECT CAST((at+?)/? AS INTEGER)*?-? at,SUM(input-cached) input,SUM(cached) cached,SUM(output) output,SUM(cost) cost FROM requests WHERE '+where+' GROUP BY 1 ORDER BY 1 DESC LIMIT 366').all(offset,bucket,bucket,offset,...args).reverse();
-    return {summary,models:group('model'),providers:group('provider'),trend,rows:rows.slice(0,50),next:rows.length>50?(rows[49] as any).id:null,since,generatedAt:now,cacheCreation:null,source:'Codex usage events'};
+    return {summary,models:group('model'),providers:group('provider'),trend,rows:rows.slice(0,50),next:rows.length>50?(rows[49] as any).id:null,since,until,bucketMs:bucket,complete:true,generatedAt:now,cacheCreation:null,source:'Codex usage events'};
   }
   detail(who:Identity,id:number){
     const row=this.db.prepare('SELECT id,thread_id threadId,turn_id turnId,model,provider,at,input,cached,output,cost,price,status FROM requests WHERE id=? AND user_id=?').get(id,who.uuid) as any;

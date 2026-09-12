@@ -13,7 +13,7 @@
     "test": "tsx --test tests/*.test.ts",
     "test:live": "tsx --test tests/live.existing.ts",
     "test:real": "tsx --test tests/live.real.ts",
-    "check": "tsc --noEmit && node --check public/app.js && node --check public/usage.js && node --check public/queue.js && node --check public/state.js && node --check public/features.js && node --check public/turns.js && node --check public/markdown.js"
+    "check": "tsc --noEmit && node --check public/app.js && node --check public/usage.js && node --check public/queue.js && node --check public/state.js && node --check public/features.js && node --check public/account-files.js && node --check public/turns.js && node --check public/markdown.js && node --check public/platform.js && node --check public/history.js && node --check public/recovery.js"
   },
   "dependencies": {
     "@koa/router": "15.7.0",

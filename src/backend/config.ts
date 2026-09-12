@@ -30,6 +30,7 @@ export interface Project {
   grants: Array<{ userId: string; permissions: Capability[] }>;
 }
 export interface ConsoleConfig {
+  accountIsolation?: boolean;
   defaultOwnerId?: string;
   enabled: boolean;
   transport: {
@@ -56,6 +57,7 @@ function invalid(message: string): never {
 }
 export async function validateConfig(value: unknown): Promise<ConsoleConfig> {
   const input = value as ConsoleConfig;
+  if(input?.accountIsolation!==undefined&&typeof input.accountIsolation!=="boolean")invalid("Invalid account isolation setting.");
   if (!input || typeof input.enabled !== "boolean" || !input.transport)
     invalid("Invalid console configuration.");
   const tr = input.transport;
@@ -159,6 +161,7 @@ export async function validateConfig(value: unknown): Promise<ConsoleConfig> {
   }
   return {
     ...(typeof input.defaultOwnerId==="string" && /^[-a-zA-Z0-9_]{1,128}$/.test(input.defaultOwnerId)?{defaultOwnerId:input.defaultOwnerId}:{}),
+    ...(input.accountIsolation===true?{accountIsolation:true}:{}),
     enabled: input.enabled,
     transport: {
       type: tr.type,
@@ -218,6 +221,7 @@ export class ConfigStore {
   }
   async save(value: unknown): Promise<void> {
     const valid = await validateConfig(value);
+    if(this.value.accountIsolation&&!valid.accountIsolation)throw new ConsoleError(409,"ISOLATION_REQUIRED","账号隔离已启用，不能通过网页关闭。");
     this.protectStore(valid);
     await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
     const tmp = this.file + "." + randomUUID() + ".tmp";

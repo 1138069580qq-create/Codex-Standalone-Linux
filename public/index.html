@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark">
-  <title>Codex</title><link rel="stylesheet" href="/style.css"><script src="/state.js" defer></script><script src="/app.js" defer></script><script src="/turns.js" defer></script><script src="/markdown.js" defer></script><script src="/features.js" defer></script><script src="/queue.js" defer></script><script src="/usage.js" defer></script>
+  <title>Codex</title><link rel="stylesheet" href="/style.css"><script src="/platform.js" defer></script><script src="/history.js" defer></script><script src="/recovery.js" defer></script><script src="/state.js" defer></script><script src="/app.js" defer></script><script src="/turns.js" defer></script><script src="/markdown.js" defer></script><script src="/features.js" defer></script><script src="/account-files.js" defer></script><script src="/queue.js" defer></script><script src="/usage.js" defer></script>
 </head>
 <body>
 <section id="login-view" class="login-shell">
@@ -12,17 +12,17 @@
     <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
     <label id="password-confirm-label" hidden>确认密码<input id="password-confirm" name="password-confirm" type="password" autocomplete="new-password" maxlength="256"></label>
     <p id="register-note" class="footnote" hidden>提交注册申请后，管理员批准才能登录。新账户不是管理员；项目与聊天按网页账户隔离显示，不是系统级文件隔离。密码至少 12 位。</p>
-    <p id="login-error" class="error" role="alert"></p><button id="login-submit" class="primary wide" type="submit">登录</button>
+    <p id="login-privacy" class="footnote">正式服务使用 HTTPS；文件库按账号隔离。本机文件需单独授权。</p><p id="login-error" class="error" role="alert"></p><button id="login-submit" class="primary wide" type="submit">登录</button>
   </form>
 </section>
 <div id="workspace" hidden>
   <header class="topbar">
     <button id="menu-toggle" class="icon mobile" aria-label="项目列表">☰</button>
     <div class="wordmark"><span class="brand-icon">c_</span> CODEX <span class="muted">/ WEBUI</span></div><div class="top-spacer"></div>
-    <span id="connection" class="badge">未连接</span><button id="connect" class="small" hidden>连接 Codex</button>
     <button id="settings" class="small" hidden>设置</button><button id="inspect-toggle" class="icon compact" aria-label="打开检查面板">☷</button>
     <span id="user-name" class="muted desktop"></span><button id="logout" class="small quiet">退出</button>
   </header>
+  <section id="connection-recovery" class="connection-recovery" role="status" hidden><div><strong id="connection">Codex 暂未连接</strong><span id="connection-message"></span></div><button id="connect" type="button" class="small">连接 Codex</button></section>
   <div class="layout">
     <aside id="sidebar" class="sidebar">
       <div class="section-title">项目 <span id="project-count" class="count">0</span><button id="new-project" class="icon" aria-label="新建项目" hidden>＋</button></div>
@@ -38,6 +38,7 @@
       <div class="task-header"><div><p id="breadcrumb" class="eyebrow"></p><h1 id="thread-title">新任务</h1></div><span id="task-status" class="badge">待命</span></div>
       <div id="notice" class="notice" role="status" hidden></div>
       <section id="side-context" class="side-context" hidden><div class="panel-title"><h2>原聊天</h2><button id="return-main" type="button" class="small" hidden>返回原聊天</button></div><div id="side-history"></div></section>
+      <section id="history-status" class="history-status" role="status" hidden><span id="history-message"></span><button id="history-retry" type="button" class="small">重试读取</button></section>
       <div id="timeline" class="timeline" aria-label="任务输出" tabindex="0"><div id="empty" class="empty-state"><h2>新任务</h2><p>输入消息，或用 / 选择技能</p></div></div>
       <div id="approvals" class="approvals"></div>
       <form id="composer" class="composer">
@@ -56,7 +57,7 @@
           <div class="compose-selects"><select id="model" aria-label="模型"><option value="">默认模型</option></select><select id="effort" aria-label="推理强度"><option value="">默认强度</option></select><select id="mode" aria-label="协作模式"><option value="code">执行</option><option value="plan">计划</option></select></div>
           <button id="check-creation" type="button" class="small" hidden>检查创建状态</button><button id="stop" type="button" class="danger" hidden>停止</button><button id="send-now" type="button" class="small" title="补充当前轮，不中断任务，沿用当前轮的模型与权限" hidden>立即发送</button><button id="send" type="submit" class="primary">发送 ↑</button>
         </div>
-        <div class="composer-footer"><select id="access" aria-label="访问权限"><option value="default">默认权限</option><option value="read-only">只读</option><option value="full">完全访问</option></select><span id="settings-source" hidden></span><button id="follow-desktop" type="button" class="small" hidden>跟随桌面</button><span id="stream-state">Ctrl / ⌘ + Enter 发送</span><button id="context-window" type="button" class="context-window" aria-haspopup="dialog" aria-controls="info-dialog" disabled>上下文：待获取</button></div>
+        <div class="composer-footer"><select id="access" aria-label="访问权限"><option value="default">默认权限</option><option value="read-only">只读</option><option value="full">完全访问</option></select><span id="settings-source" hidden></span><button id="follow-desktop" type="button" class="small" hidden>恢复当前设置</button><span id="stream-state">Ctrl / ⌘ + Enter 发送</span><button id="context-window" type="button" class="context-window" aria-haspopup="dialog" aria-controls="info-dialog" disabled>上下文：待获取</button></div>
       </form>
       <div id="run-metrics" class="run-metrics" aria-label="聊天运行统计" hidden></div>
     </main>
@@ -64,7 +65,7 @@
       <div class="section-title">详情 <button id="close-inspector" class="icon compact" aria-label="关闭检查面板">×</button></div>
       <div class="inspector-tabs" role="tablist"><button class="active" data-panel="quota" role="tab" aria-selected="true">账号额度</button><button data-panel="files" role="tab" aria-selected="false">文件</button><button data-panel="browser" role="tab" aria-selected="false">浏览器</button><button data-panel="diff" role="tab" aria-selected="false">Diff</button></div>
       <section id="panel-quota" class="inspector-panel"><div class="panel-title"><h2>额度</h2><button id="refresh-quota" class="icon" aria-label="刷新额度">↻</button></div><div id="quota-content" class="muted">尚未读取</div></section>
-      <section id="panel-files" class="inspector-panel" hidden><div class="panel-title"><h2>项目文件</h2><button id="files-up" class="icon" aria-label="上级目录">↑</button></div><p id="file-path" class="path">/</p><button id="refresh-files" class="small wide">刷新</button><div class="file-tools"><button id="external-open" class="small" type="button">服务器下载外部文件</button><span id="transfer-status" class="footnote" role="status"></span></div><div id="file-list"></div>
+      <section id="panel-files" class="inspector-panel" hidden><div class="panel-title"><h2>服务器文件</h2><select id="file-scope" aria-label="文件存储位置"><option value="account-storage">我的文件库</option><option value="project">项目文件</option></select><button id="files-up" class="icon" aria-label="上级目录">↑</button></div><p id="file-path" class="path">/</p><button id="refresh-files" class="small wide">刷新</button><div class="file-tools"><button id="external-open" class="small" type="button">服务器下载外部文件</button><span id="transfer-status" class="footnote" role="status"></span></div><div id="account-file-tools" class="file-tools"><input id="account-folder-name" aria-label="新文件夹名称" placeholder="文件夹名称" maxlength="120"><button id="account-mkdir" type="button" class="small">新建目录</button><button id="account-upload" type="button" class="small">上传原文件</button><input id="account-upload-input" type="file" multiple hidden></div><div id="file-list"></div>
         <section id="file-preview" hidden><div class="panel-title"><h3 id="preview-title"></h3><button id="preview-fullscreen" type="button" class="small">全屏查看</button><button id="preview-close" type="button" class="icon" aria-label="关闭文件预览">×</button></div><div id="preview-body"></div></section></section>
       <section id="panel-browser" class="inspector-panel" hidden><h2>简易浏览器</h2><form id="browser-form"><label>HTTPS 地址<input id="browser-url" type="url" placeholder="https://example.com" required maxlength="4096"></label><div class="file-tools"><button type="submit" class="small">打开</button><button id="browser-clear" type="button" class="small">关闭网页</button></div></form><p class="footnote">仅在点击打开后加载。隔离网页不能读取本应用；不支持任意网站登录。有些网站禁止嵌入，可在新窗口打开。</p><a id="browser-external" target="_blank" rel="noopener noreferrer" hidden>在新窗口打开</a><div id="browser-surface"></div></section>
       <section id="panel-diff" class="inspector-panel" hidden><div class="panel-title"><h2>Diff</h2><button id="refresh-diff" class="icon" aria-label="刷新差异">↻</button></div><pre id="diff-content" class="diff">点击刷新</pre></section>
@@ -72,7 +73,7 @@
   </div>
 </div>
 <dialog id="usage-dialog" class="usage-dialog"><div class="dialog-header"><h2>使用统计</h2><button id="close-usage" type="button" class="icon" aria-label="关闭统计">×</button></div>
-<div class="usage-toolbar"><select id="usage-range" aria-label="统计时间"><option value="today">当天</option><option value="7d">近 7 天</option><option value="30d">近 30 天</option><option value="all">全部</option></select><select id="usage-model" aria-label="筛选模型"><option value="">全部模型</option></select><select id="usage-provider" aria-label="筛选供应商"><option value="">全部供应商</option></select><span class="top-spacer"></span><label class="usage-refresh-label">额度更新<select id="usage-interval" aria-label="额度更新间隔"><option value="5">5 分钟</option><option value="30">30 分钟</option></select></label><button id="usage-refresh" type="button" class="small">刷新</button></div>
+<div class="usage-toolbar"><select id="usage-range" aria-label="统计时间"><option value="today">当天</option><option value="yesterday">昨天</option><option value="month">本月</option><option value="7d">近 7 天</option><option value="30d">近 30 天</option><option value="all">全部</option><option value="custom">自定义</option></select><span id="usage-dates" hidden><label>开始日期<input id="usage-start" type="date"></label><label>结束日期<input id="usage-end" type="date"></label><button id="usage-apply" type="button" class="small">应用范围</button></span><select id="usage-model" aria-label="筛选模型"><option value="">全部模型</option></select><select id="usage-provider" aria-label="筛选供应商"><option value="">全部供应商</option></select><span class="top-spacer"></span><label class="usage-refresh-label">额度更新<select id="usage-interval" aria-label="额度更新间隔"><option value="5">5 分钟</option><option value="30">30 分钟</option></select></label><button id="usage-refresh" type="button" class="small">刷新</button></div>
 <p id="usage-error" class="error" role="alert" hidden></p><section id="usage-hero" class="usage-hero"></section><section class="usage-chart-card"><h3>使用趋势</h3><div id="usage-chart"></div></section>
 <div class="usage-tabs" role="tablist"><button data-usage-tab="requests" type="button" role="tab">请求日志</button><button data-usage-tab="providers" type="button" role="tab">供应商统计</button><button data-usage-tab="models" type="button" role="tab">模型统计</button><button data-usage-tab="quota" type="button" role="tab">额度明细</button><button id="usage-members-tab" data-usage-tab="members" type="button" role="tab" hidden>成员用量</button><button id="usage-settings-tab" data-usage-tab="settings" type="button" role="tab" hidden>定价与套餐</button></div>
 <section id="usage-members" hidden aria-label="成员本周期用量"></section><div id="usage-table" class="usage-table-wrap"></div><button id="usage-more" type="button" class="small" hidden>加载更多</button><section id="usage-quota" hidden><div id="usage-estimates"></div><div id="quota-detail-content"></div></section>

@@ -107,3 +107,9 @@ test('public plan metadata without billing dates retains dollars and separately 
  ledger.syncSubscription(normalizeSubscription({account:{type:'chatgpt',planType:'pro'}},at()));sample(ledger,at(),10);tick(1000);ledger.usage('observed-a',counters(25000000),at());ledger.usage('observed-b',counters(50000000),at());sample(ledger,at(),12);
  const d=ledger.memberOverview(admin,[{id:a.uuid,username:'A'},{id:b.uuid,username:'B'}]);assert.equal(d.cycle.configured,false);assert.equal(d.members[0].subscriptionPercent,null);assert.equal(d.members[0].cycleUsage.cost,50);assert.equal(d.total.cycleUsage.cost,150);assert.ok(Math.abs(d.members[0].observedSubscriptionPercent!-2/15)<1e-10);assert.ok(Math.abs(d.members[1].observedSubscriptionPercent!-4/15)<1e-10);assert.equal(d.total.observedSubscriptionPercent,.4);assert.equal(d.weeksPerCycle,5);
 });
+
+test('custom dates include both boundaries and exclude other accounts and later records',async t=>{
+ const {ledger,at,tick}=await fixture(t);ledger.bind('a',a,'pa',price.model,'visible',true);ledger.bind('b',b,'pb',price.model,'secret',true);
+ const start=at();ledger.usage('a',counters(100),at());tick(1000);const end=at();ledger.usage('a',counters(200),at());ledger.usage('b',counters(900),at());tick(1);ledger.usage('a',counters(300),at());
+ const d=ledger.details(a,{range:'custom',start,end});assert.equal(d.summary.requests,2);assert.equal(d.since,start);assert.equal(d.until,end);assert.equal(d.complete,true);assert.ok(!JSON.stringify(d).includes('secret'));assert.throws(()=>ledger.details(a,{range:'custom',start:end,end:start}));
+});

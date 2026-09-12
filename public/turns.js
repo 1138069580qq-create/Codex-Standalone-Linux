@@ -18,7 +18,8 @@
     const timings=new Map((state.turns||[]).map(t=>[t.id,t]));
     return rows.map((row,index)=>{
       const timing=timings.get(row.id),isCurrent=state.turnId?state.turnId===row.id:index===rows.length-1;
-      const running=timing?active(timing.status):isCurrent&&active(state.status);
+      const stale=['cached','loading','error'].includes(state.historyState);
+      const running=!stale&&(timing?active(timing.status):isCurrent&&active(state.status));
       const status=timing?.status||(running?'inProgress':isCurrent&&state.status==='failed'?'failed':'completed');
       const users=row.items.filter(i=>i.type==='userMessage'),others=row.items.filter(i=>i.type!=='userMessage');
       let finals=others.filter(i=>i.type==='agentMessage'&&i.phase==='final_answer');
@@ -49,7 +50,7 @@
       const failed=['failed','interrupted','cancelled','canceled'].includes(status);
       return {...row,users,process,finals,images,files,running,status,elapsed,
         collapsible:!running&&!failed&&(finals.length>0||images.length>0||files.length>0),
-        label:(running?'正在处理':failed?(status==='failed'?'执行失败':'已停止'):'用时')+(duration(elapsed)?' '+duration(elapsed):running?'…':failed?'':' · 查看过程')};
+        label:(stale&&active(timing?.status)?'记录时运行中':running?'正在处理':failed?(status==='failed'?'执行失败':'已停止'):'用时')+(duration(elapsed)?' '+duration(elapsed):running?'…':failed?'':' · 查看过程')};
     });
   }
   const api={group,duration};if(typeof module!=='undefined')module.exports=api;else scope.CodexTurns=api;

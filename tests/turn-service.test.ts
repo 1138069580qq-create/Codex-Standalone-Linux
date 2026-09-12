@@ -1,3 +1,4 @@
+import {fakeHistoryReader} from './fixtures/history-peer';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {promises as fs} from 'node:fs';
@@ -18,7 +19,7 @@ test('real HTTP pipeline restores final/timing/image metadata and enforces gener
  const turn={id:'t',status:'completed',startedAt:100,completedAt:227,items:[{id:'u',type:'userMessage',content:[{type:'text',text:'generate'}]},{id:'g',type:'imageGeneration',savedPath:saved,status:'completed'},{id:'a',type:'agentMessage',phase:'final_answer',text:'[result.txt]('+path.join(root,'result.txt')+')'}]};
  const thread={id:'thread',cwd:root,name:'Turn fixture',status:'idle'};
  class Peer extends EventEmitter{connected=false;serverInfo={userAgent:'test'};async connect(){this.connected=true;}close(){this.connected=false;}async request(method:string,params:any){if(method==='thread/read'||method==='thread/resume')return {thread:params.threadId==='thread'?thread:{...thread,id:'foreign',cwd:path.join(dir,'elsewhere')}};if(method==='thread/turns/list')return {data:[turn]};if(method==='thread/list')return {data:[thread]};return {};}}
- const peer=new Peer(),runtime=await createApp({host:'127.0.0.1',port:3210,origin:'http://127.0.0.1:3210',dataDir:data,secureCookies:false},(c,r)=>new CodexConsoleService(c,r,()=>peer as any));await runtime.service.connect();
+ const peer=new Peer(),runtime=await createApp({host:'127.0.0.1',port:3210,origin:'http://127.0.0.1:3210',dataDir:data,secureCookies:false},(c,r)=>new CodexConsoleService(c,r,()=>peer as any,fakeHistoryReader((m,p)=>peer.request(m,p))));await runtime.service.connect();
  const server=runtime.app.listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));t.after(async()=>{runtime.close();server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));});
  const base='http://127.0.0.1:'+(server.address() as any).port;let cookie='';const request=(url:string,headers:Record<string,string>={})=>fetch(base+url,{headers:{cookie,...headers}}),url='/api/codex/files/generated-image?projectId=p&threadId=thread&itemId=g&index=0';
  assert.equal((await request(url)).status,401);

@@ -152,7 +152,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
   app.use(auth.routes()).use(auth.allowedMethods());
   app.use(routes.router.routes()).use(routes.router.allowedMethods());
   const assets = new Map<string, { raw: Buffer; gzip: Buffer; br: Buffer; etag: string; type: string }>();
-  const allowed = [["/", "index.html", "text/html"], ["/turns.js", "turns.js", "text/javascript"], ["/markdown.js", "markdown.js", "text/javascript"], ["/features.js", "features.js", "text/javascript"], ["/app.js", "app.js", "text/javascript"], ["/queue.js", "queue.js", "text/javascript"], ["/state.js", "state.js", "text/javascript"], ["/usage.js", "usage.js", "text/javascript"], ["/style.css", "style.css", "text/css"]];
+  const allowed = [["/account-files.js", "account-files.js", "text/javascript"], ["/", "index.html", "text/html"], ["/history.js", "history.js", "text/javascript"], ["/recovery.js", "recovery.js", "text/javascript"], ["/platform.js", "platform.js", "text/javascript"], ["/turns.js", "turns.js", "text/javascript"], ["/markdown.js", "markdown.js", "text/javascript"], ["/features.js", "features.js", "text/javascript"], ["/app.js", "app.js", "text/javascript"], ["/queue.js", "queue.js", "text/javascript"], ["/state.js", "state.js", "text/javascript"], ["/usage.js", "usage.js", "text/javascript"], ["/style.css", "style.css", "text/css"]];
   const assetVersions = new Map<string,string>();
   for(const [route,filename] of allowed) if(route !== "/") assetVersions.set(route,createHash("sha256").update(await fs.readFile(path.join(staticDir,filename))).digest("hex").slice(0,12));
   for (const [route, filename, type] of allowed) {

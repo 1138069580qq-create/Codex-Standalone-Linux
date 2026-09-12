@@ -29,6 +29,7 @@
     const p=s.cycle.configured&&Number.isFinite(s.weeklyPercent)?s.weeklyPercent/5:null,box=metric('本账户占周期总额度',Number.isFinite(p)?p.toFixed(2)+'%':'待估算','总周期固定为 5 个周额度（100%）；本账户累计已用周额度百分比 ÷ 5。每个采样区间按美元费用占比分摊实际减少的周额度，再累加（估算）。');
     const bar=el('progress');bar.max=100;bar.value=Number.isFinite(p)?Math.min(100,p):0;bar.setAttribute('aria-label','订阅周期已用百分比');box.append(bar);node.append(box);
     if(!s.cycle.configured&&s.cycle.reason==='period-not-provided'&&Number.isFinite(s.weeklyPercent))node.append(metric('已观测占五周额度',(s.weeklyPercent/5).toFixed(2)+'%','套餐起止日期未提供；仅含已观测区间，不代表已核实的完整账期。'));
+    const estimate=Number.isFinite(p)?p:!s.cycle.configured&&s.cycle.reason==='period-not-provided'&&Number.isFinite(s.weeklyPercent)?s.weeklyPercent/5:null;node.append(metric('已用人民币额度（估算）',Number.isFinite(estimate)?'¥'+(estimate/100*650).toFixed(2):'待估算','已用整体比例 × ¥650；只计算已观测用量，缺失区间不补零。'));
     const button=el('button','使用统计 ›','small wide');button.id='open-usage';button.onclick=action(open);node.append(button);
     if(S.user?.admin){const members=el('button','成员用量与总计 ›','small wide');members.id='open-member-usage';members.onclick=action(()=>open('members'));node.append(members);}
     const quota=el('button',S.user?.admin?'额度与重置卡 ›':'查看额度详情 ›','small wide');quota.id='open-quota-detail';quota.onclick=action(()=>open('quota'));node.append(quota);
@@ -49,6 +50,7 @@
   async function loadDetails(more=false){
     const sequence=++U.detailSequence,account=S.user?.id;error('');
     const query=new URLSearchParams({range:$('usage-range').value,offset:String(-new Date().getTimezoneOffset())});
+    if($('usage-range').value==='custom'){const start=new Date($('usage-start').value+'T00:00:00'),end=new Date($('usage-end').value+'T00:00:00');end.setDate(end.getDate()+1);const finish=end.getTime()-1;if(!Number.isFinite(start.getTime())||!Number.isFinite(finish)||finish<start.getTime()){error('请选择有效的开始和结束日期');return;}query.set('start',String(start.getTime()));query.set('end',String(finish));}
     for(const name of ['model','provider'])if($('usage-'+name).value)query.set(name,$('usage-'+name).value);
     if(more&&U.before)query.set('before',String(U.before));
     $('usage-more').disabled=true;$('usage-refresh').disabled=true;
@@ -66,8 +68,8 @@
     const host=$('usage-chart');host.replaceChildren();if(!d.trend.length){host.append(el('p','这个时间范围暂无用量','muted'));return;}
     const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 1040 245');svg.setAttribute('role','img');svg.setAttribute('aria-label','用量和美元费用趋势图');
     const add=(tag,attrs,text)=>{const node=document.createElementNS(ns,tag);for(const [k,v]of Object.entries(attrs))node.setAttribute(k,String(v));if(text!==undefined)node.textContent=text;svg.append(node);return node;};
-    const step=$('usage-range').value==='today'?3600000:86400000,begin=Math.max(d.since,d.generatedAt-step*365),first=Math.floor((begin+new Date().getTimezoneOffset()*-60000)/step)*step-new Date().getTimezoneOffset()*-60000;
-    const found=new Map(d.trend.map(p=>[p.at,p])),points=[];for(let at=first;at<=d.generatedAt&&points.length<366;at+=step)points.push(found.get(at)||{at,input:0,cached:0,output:0,cost:0});
+    const step=d.bucketMs||($('usage-range').value==='today'?3600000:86400000),end=Math.min(d.until??d.generatedAt,d.generatedAt),begin=Math.max(d.since,end-step*365),first=Math.floor((begin+new Date().getTimezoneOffset()*-60000)/step)*step-new Date().getTimezoneOffset()*-60000;
+    const found=new Map(d.trend.map(p=>[p.at,p])),points=[];for(let at=first;at<=end&&points.length<366;at+=step)points.push(found.get(at)||{at,input:0,cached:0,output:0,cost:0});
     if(points.length===1)points.push({...points[0],at:points[0].at+step});
     const tokenMax=Math.max(1,...points.flatMap(p=>[p.input,p.cached,p.output])),costMax=Math.max(.01,...points.map(p=>p.cost||0));
     for(let i=0;i<=4;i++){const y=12+i*45;add('line',{x1:54,x2:975,y1:y,y2:y,stroke:'#344247','stroke-dasharray':'3 5'});add('text',{x:47,y:y+4,fill:'#8d9e9f','text-anchor':'end','font-size':11},compact(tokenMax*(1-i/4)));add('text',{x:985,y:y+4,fill:'#8d9e9f','font-size':11},'$'+(costMax*(1-i/4)).toFixed(2));}
@@ -140,7 +142,8 @@
     }catch(error){if(account===S.user?.id&&sequence===U.recordSequence&&dialog.open){node.replaceChildren();layerMessage(error.message,true,dialog);}}
   }
   $('close-usage').onclick=()=>$('usage-dialog').close();$('close-usage-record').onclick=()=>{++U.recordSequence;$('usage-record-dialog').close();};
-  for(const id of ['usage-range','usage-model','usage-provider'])$(id).onchange=()=>loadDetails();
+  for(const id of ['usage-model','usage-provider'])$(id).onchange=()=>loadDetails();
+  $('usage-range').onchange=()=>{$('usage-dates').hidden=$('usage-range').value!=='custom';if($('usage-range').value!=='custom')loadDetails();};$('usage-apply').onclick=action(()=>loadDetails());
   $('usage-more').onclick=action(()=>loadDetails(true));$('usage-refresh').onclick=action(()=>Promise.all([load(true),loadDetails()]));
   for(const button of document.querySelectorAll('[data-usage-tab]'))button.onclick=action(()=>selectTab(button.dataset.usageTab));
   $('usage-interval').onchange=()=>{U.interval=$('usage-interval').value==='30'?30:5;try{localStorage.setItem('codex-usage-refresh',String(U.interval));}catch{}schedule();renderSummary();};

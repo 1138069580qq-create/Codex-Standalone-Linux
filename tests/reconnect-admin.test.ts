@@ -1,3 +1,4 @@
+import {fakeHistoryReader} from './fixtures/history-peer';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
@@ -27,7 +28,7 @@ test('HTTP recovery reattaches existing backend, preserves ACL/manual disconnect
    throw Error('Unexpected RPC '+method);
   }
  }
- const peer=new Peer();const runtime=await createApp({host:'127.0.0.1',port:3210,origin:'http://127.0.0.1:3210',dataDir:data,secureCookies:false},(c,r)=>new CodexConsoleService(c,r,()=>peer as any));await runtime.service.connect();
+ const peer=new Peer();const runtime=await createApp({host:'127.0.0.1',port:3210,origin:'http://127.0.0.1:3210',dataDir:data,secureCookies:false},(c,r)=>new CodexConsoleService(c,r,()=>peer as any,fakeHistoryReader((m,p)=>peer.request(m,p))));await runtime.service.connect();
  const server=runtime.app.listen(0,'127.0.0.1');await new Promise<void>(resolve=>server.once('listening',resolve));t.after(async()=>{runtime.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));});const origin='http://127.0.0.1:'+(server.address() as any).port;
  const login=async(username:string)=>{const r=await fetch(origin+'/api/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username,password:'fixture-password'})});assert.equal(r.status,200);const body=await r.json() as any;return {cookie:r.headers.get('set-cookie')!.split(';')[0],'x-csrf-token':body.csrf};};
  const a=await login('admin'),m=await login('member');const call=(who:any,url:string,body?:any,extra:any={})=>fetch(origin+url,{method:body===undefined?'GET':'POST',headers:{...who,'content-type':'application/json',...extra},body:body===undefined?undefined:JSON.stringify(body)});

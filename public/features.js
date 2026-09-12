@@ -1,10 +1,11 @@
 /* Incremental features for the standalone UI. No framework/build step or GitHub integration. */
 'use strict';
 (() => {
-  const groups=new Map();let fileSequence=0,registrationSequence=0,imageSequence=0,timingTimer=null;
+  const groups=new Map();let uploadBusy=false,uploadCancelled=false,uploadController=null;let fileSequence=0,registrationSequence=0,imageSequence=0,timingTimer=null;
   const endpoint=(route,projectId,extra={})=>'/api/codex/'+route+'?'+q({projectId,...extra});
-  const same=(epoch,projectId)=>epoch===S.epoch&&projectId===S.project?.id&&!!S.user;
-  function reset(){fileSequence++;registrationSequence++;imageSequence++;groups.clear();clearInterval(timingTimer);timingTimer=null;$('preview-body').replaceChildren();$('file-list').replaceChildren();$('file-preview').hidden=true;$('file-dialog').close();$('image-dialog').close();$('full-image').removeAttribute('src');$('browser-surface').replaceChildren();$('browser-external').hidden=true;$('transfer-status').textContent='';}
+  const same=(epoch,projectId)=>epoch===S.epoch&&(projectId==='account-storage'||projectId===S.project?.id)&&!!S.user;
+  function resetTimeline(){groups.clear();clearInterval(timingTimer);timingTimer=null;}
+  function reset(){cancelUpload();globalThis.CodexPlatform?.resetMedia()?.catch(()=>{});fileSequence++;registrationSequence++;imageSequence++;groups.clear();clearInterval(timingTimer);timingTimer=null;$('preview-body').replaceChildren();$('file-list').replaceChildren();$('file-preview').hidden=true;$('file-dialog').close();$('image-dialog').close();$('full-image').removeAttribute('src');$('browser-surface').replaceChildren();$('browser-external').hidden=true;$('transfer-status').textContent='';}
   function fileUrl(value,full=false,projectId=S.project?.id){
     const image=typeof value==='string'?{path:value}:value;
     return image.generated?endpoint('files/generated-image',projectId,{threadId:S.thread?.id,itemId:image.itemId,index:String(image.imageIndex||0),...(full?{full:'1'}:{})}):endpoint('files/image',projectId,{path:image.path,...(full?{full:'1'}:{})});
@@ -13,8 +14,8 @@
     if((image.path||image.generated)&&permission('files')){
       const ref={...image,itemId:image.itemId||itemId},title=image.alt||(image.path||image.generated).split('/').pop();
       const button=el('button',undefined,'thumbnail-button');button.type='button';button.setAttribute('aria-label','查看全图 '+title);
-      const img=el('img');img.src=fileUrl(ref);img.alt=title;img.loading='lazy';img.decoding='async';img.width=160;img.height=120;img.dataset.preview='thumbnail';
-      img.onerror=()=>{img.removeAttribute('src');button.classList.add('image-unavailable');button.title='缩略图暂不可用，点击重试全图';};button.append(img);button.onclick=()=>openImage(ref,title);return button;
+      const img=el('img');img.alt=title;img.loading='lazy';img.decoding='async';img.width=160;img.height=120;img.dataset.preview='thumbnail';
+      img.onerror=()=>{img.removeAttribute('src');button.classList.add('image-unavailable');button.title='缩略图暂不可用，点击重试全图';};if(globalThis.CodexPlatform)CodexPlatform.image(img,fileUrl(ref));else img.src=fileUrl(ref);button.append(img);button.onclick=()=>openImage(ref,title);return button;
     }
     // Never auto-fetch arbitrary remote URLs from model output.
     if(image.src){try{const url=new URL(image.src);if(url.protocol==='https:'&&!url.username&&!url.password){const link=el('a','外部图片（点击打开）');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';return link;}}catch{}}
@@ -49,7 +50,7 @@
         const title=names[item.type]||labelType(item.type),detail=item.type==='commandExecution'?item.text.split('\n')[0]:item.type==='fileChange'?(item.files||[]).map(f=>f.path.split('/').pop()).join('、'):'';
         node.summary.replaceChildren(el('span',title,'tool-label'));if(detail)node.summary.append(el('span',detail,'tool-detail'));if(item.status==='failed')node.summary.append(el('span','失败','tool-failed'));
         node.body.replaceChildren(el('pre',item.text+(item.truncated?'\n[内容已截断]':'')));
-      }else node.body.replaceChildren(item.type==='userMessage'?el('div',item.text,'user-text'):markdown(item));
+      }else {const content=item.type==='userMessage'?el('div',item.text,'user-text'):markdown(item);if(globalThis.CodexMobileVisuals)CodexMobileVisuals.reconcile(node.body,content);else node.body.replaceChildren(content);}
       node.media.replaceChildren();if(item.type==='userMessage')for(const [imageIndex,image]of(item.images||[]).entries())node.media.append(thumbnail({...image,imageIndex},item.id));
     }
     return node.root;
@@ -89,18 +90,21 @@
   async function openImage(path,title){
     const id=++imageSequence,epoch=S.epoch,projectId=S.project?.id,img=$('full-image');$('image-title').textContent=title;$('image-state').textContent='按需加载全图…';$('image-canvas').classList.remove('actual-size');$('image-zoom').textContent='原始尺寸';
     img.onload=()=>{if(id===imageSequence&&same(epoch,projectId))$('image-state').textContent=`${img.naturalWidth} × ${img.naturalHeight} · 全分辨率安全预览`;};
-    img.onerror=()=>{if(id===imageSequence)$('image-state').textContent='全图无法加载或权限已失效；可在文件面板下载原始文件。';};img.src=fileUrl(path,true,projectId);$('image-dialog').showModal();
+    img.onerror=()=>{if(id===imageSequence)$('image-state').textContent='全图无法加载或权限已失效；可在文件面板下载原始文件。';};if(globalThis.CodexPlatform)CodexPlatform.image(img,fileUrl(path,true,projectId));else img.src=fileUrl(path,true,projectId);$('image-dialog').showModal();
   }
   function openInspector(){ S.panel='files';for(const name of ['quota','files','diff','browser'])$('panel-'+name).hidden=name!=='files';for(const button of document.querySelectorAll('[data-panel]')){const active=button.dataset.panel==='files';button.classList.toggle('active',active);button.setAttribute('aria-selected',String(active));}$('inspector').classList.add('inspect-open'); }
   async function previewFile(path){
+    if(globalThis.CodexFiles){$('file-dialog').close();return CodexFiles.openProjectFile(path); }
     const sequence=++fileSequence,epoch=S.epoch,projectId=S.project?.id;const info=await api(endpoint('files/preview',projectId,{path}));if(sequence!==fileSequence||!same(epoch,projectId))return;
     $('file-dialog').close();$('preview-title').textContent=path;$('preview-body').replaceChildren();$('file-preview').hidden=false;openInspector();
     const body=$('preview-body'),meta=el('p',`${bytes(info.size)}${info.truncated?' · 仅显示前 64 KiB / 受限提取内容':''}`,'footnote'),download=el('a','下载原始文件','small');download.href=endpoint('files/content',projectId,{path});download.download=path.split('/').pop();body.append(meta,download);
     if(info.kind==='image'){const view=thumbnail({path,alt:path},path);if(view)body.append(view);body.append(el('p','点击小图查看全分辨率图片。','footnote'));}
     else if(info.kind==='text'||info.kind==='archive')body.append(el('pre',info.text||'(无可提取内容)','file-text'));
-    else if(info.kind==='pdf'){const load=el('button','加载 PDF 预览（按需请求文件）','small');load.type='button';load.onclick=()=>{const frame=el('iframe');frame.title=path;frame.className='document-preview';frame.setAttribute('sandbox','');frame.referrerPolicy='no-referrer';frame.src=endpoint('files/content',projectId,{path,inline:'1'});load.replaceWith(frame);};body.append(load);}
+    else if(info.kind==='pdf'){const load=el('button','加载 PDF 预览（按需请求文件）','small');load.type='button';load.onclick=()=>{if(globalThis.CodexPlatform?.native){globalThis.CodexPlatform.previewPdf(endpoint('files/content',projectId,{path}),path).catch(error=>toast(error.message,true));return;}const frame=el('iframe');frame.title=path;frame.className='document-preview';frame.setAttribute('sandbox','');frame.referrerPolicy='no-referrer';frame.src=endpoint('files/content',projectId,{path,inline:'1'});load.replaceWith(frame);};body.append(load);}
+    else if(info.kind==='media'&&globalThis.CodexPlatform?.native){const open=el('button','下载并在播放器打开','small');open.type='button';open.onclick=()=>CodexPlatform.download(endpoint('files/content',projectId,{path}),path,'open').catch(e=>toast(e.message,true));body.append(open);}
     else if(info.kind==='media'){const media=el(info.contentType.startsWith('audio/')?'audio':'video');media.controls=true;media.preload='none';media.src=endpoint('files/content',projectId,{path,inline:'1'});media.className='media-preview';body.append(media);}
     else body.append(el('p','此格式只显示文件信息，不会自动下载完整内容。','footnote'));
+    globalThis.CodexMobile?.fileReady();
   }
   async function loadFiles(){
     if(!permission('files'))throw new Error('没有文件权限。');const epoch=S.epoch,projectId=S.project.id,requested=S.filePath;const result=await api(endpoint('files',projectId,{path:requested}));if(!same(epoch,projectId)||requested!==S.filePath)return;
@@ -108,13 +112,17 @@
       if(entry.type==='file'){const download=el('a','↓','file-download');download.href=endpoint('files/content',projectId,{path:entry.path});download.download=entry.name;download.title='下载 '+entry.name;download.setAttribute('aria-label','下载 '+entry.name);row.append(el('span',bytes(entry.size),'footnote'),download);}$('file-list').append(row);
     }if(!result.entries.length)$('file-list').append(el('p','空目录或没有可展示的文件。','footnote'));
   }
-  async function retry(fn){for(let attempt=0;;attempt++){try{return await fn();}catch(error){if(attempt>=2||error.status&&![408,429,502,503,504].includes(error.status))throw error;await new Promise(resolve=>setTimeout(resolve,500*(attempt+1)));}}}
-  async function upload(file,projectId,epoch){
+  async function retry(fn){for(let attempt=0;;attempt++){try{return await fn();}catch(error){if(error.name==='AbortError'||attempt>=2||error.status&&![408,429,502,503,504].includes(error.status))throw error;await new Promise(resolve=>setTimeout(resolve,500*(attempt+1)));}}}
+  function cancelUpload(){uploadCancelled=true;uploadController?.abort();}
+  async function upload(file,projectId,epoch,folder){
+    if(uploadBusy)throw new Error('等待当前附件上传完成，或取消传输。');uploadBusy=true;uploadCancelled=false;
+    try{
     if(file.size>4*1024*1024)throw new Error('附件最多 4 MiB。');if(!crypto.subtle)throw new Error('安全分块上传需要 HTTPS。');const buffer=await file.arrayBuffer(),hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',buffer))).map(n=>n.toString(16).padStart(2,'0')).join('');
-    const ensure=()=>{if(!same(epoch,projectId))throw new Error('项目已切换，上传已停止。');};ensure();
-    let state=await retry(()=>api('/api/codex/uploads',{projectId,name:file.name,size:file.size,hash}));
-    while(state.offset<file.size){ensure();const offset=state.offset,chunk=buffer.slice(offset,offset+state.chunkBytes);state=await retry(async()=>{ensure();const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),30000);try{const response=await fetch(endpoint(`uploads/${encodeURIComponent(state.id)}`,projectId,{offset:String(offset)}),{method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/octet-stream','X-CSRF-Token':S.csrf},body:chunk,signal:controller.signal});const data=await response.json();if(!response.ok){const e=new Error(data.data?.message||'上传失败');e.status=response.status;throw e;}return data;}finally{clearTimeout(timer);}});if(same(epoch,projectId))$('transfer-status').textContent=`${file.name} · ${Math.round(state.offset/file.size*100)}%`;}
-    ensure();const result=await retry(()=>api(`/api/codex/uploads/${encodeURIComponent(state.id)}/commit`,{projectId}));if(same(epoch,projectId))$('transfer-status').textContent=`${file.name} · 校验完成`;return result;
+    const ensure=()=>{if(uploadCancelled)throw new DOMException('上传已取消','AbortError');if(!same(epoch,projectId))throw new Error('项目已切换，上传已停止。');};ensure();
+    let state=await retry(()=>api('/api/codex/uploads',{projectId,name:file.name,size:file.size,hash,...(folder?{path:folder}:{})}));
+    while(state.offset<file.size){ensure();const offset=state.offset,chunk=buffer.slice(offset,offset+state.chunkBytes);state=await retry(async()=>{ensure();const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),30000);uploadController=controller;try{const response=await (globalThis.CodexPlatform?.request || fetch)(endpoint(`uploads/${encodeURIComponent(state.id)}`,projectId,{offset:String(offset),...(folder?{path:folder}:{})}),{method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/octet-stream','X-CSRF-Token':S.csrf},body:chunk,signal:controller.signal});const data=await response.json();if(!response.ok){const e=new Error(data.data?.message||'上传失败');e.status=response.status;throw e;}return data;}finally{clearTimeout(timer);}});if(same(epoch,projectId))$('transfer-status').textContent=`${file.name} · ${Math.round(state.offset/file.size*100)}%`;}
+    ensure();const result=await retry(()=>api(`/api/codex/uploads/${encodeURIComponent(state.id)}/commit`,{projectId,...(folder?{path:folder}:{})}));ensure();if(same(epoch,projectId))$('transfer-status').textContent=`${file.name} · 校验完成`;return result;
+    }finally{uploadBusy=false;uploadController=null;if(same(epoch,projectId))$('transfer-status').textContent='';}
   }
   async function loadRegistrations(){
     if(!S.user?.admin)return;const account=S.user.id,sequence=++registrationSequence,rows=await api('/api/admin/registrations');if(account!==S.user?.id||sequence!==registrationSequence||!S.user?.admin)return;
@@ -133,5 +141,5 @@
   $('browser-clear').onclick=()=>{$('browser-surface').replaceChildren();$('browser-external').hidden=true;};
   $('external-open').onclick=action(async()=>{if(!permission('files'))throw new Error('没有文件权限。');const epoch=S.epoch,projectId=S.project.id,options=await api(endpoint('files/options',projectId));if(!same(epoch,projectId))return;$('external-hosts').textContent=options.downloadHosts.length?'允许域名：'+options.downloadHosts.join('、'):'当前没有允许的域名；管理员可在项目配置中设置 downloadHosts。';$('external-dialog').showModal();});
   $('external-close').onclick=()=>$('external-dialog').close();$('external-form').onsubmit=action(async()=>{const epoch=S.epoch,projectId=S.project?.id;await api('/api/codex/files/external',{projectId,name:$('external-name').value,url:$('external-url').value});if(!same(epoch,projectId))return;$('external-dialog').close();S.filePath='.codex-uploads';await loadFiles();toast('外部文件已下载到项目。');});
-  globalThis.CodexFeatures={reset,renderTimeline,loadFiles,previewFile,openImage,upload,loadRegistrations};
+  globalThis.CodexFeatures={cancelUpload,get uploading(){return uploadBusy;},reset,resetTimeline,renderTimeline,loadFiles,previewFile,openImage,upload,loadRegistrations};
 })();

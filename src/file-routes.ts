@@ -1,3 +1,4 @@
+import {STORAGE_ID,storageDirectory,makeStorageDirectory,saveStorageFile} from './backend/account-storage';
 import type Koa from "koa";
 import type Router from "@koa/router";
 import {ConsoleError,type Identity,type Project} from "./backend/config";
@@ -10,7 +11,7 @@ import {contentType,isMediaType} from "./backend/mime";
 type Handler=(c:Koa.ParameterizedContext,who:Identity)=>Promise<unknown>|unknown;
 type Access={root:(who:Identity,id:string,capability:"files")=>Promise<string>;wrap:(handler:Handler)=>Koa.Middleware;project:(who:Identity,id:string)=>Project;snapshot:(who:Identity,id:string,threadId:string)=>Promise<any>};
 export function installFileRoutes(router:Router, access:Access) {
-  const uploads=new UploadSessions(),images=new ThumbnailCache();let previews=0,downloads=0;
+  const uploads=new UploadSessions(),libraryUploads=new UploadSessions((encoded,name,data)=>{const {root,folder}=JSON.parse(encoded);return saveStorageFile(root,name,data,folder);}),images=new ThumbnailCache();let previews=0,downloads=0;
   const query=(c:Koa.Context,key:string)=>{const v=c.query[key];if(typeof v!=="string"||!v||v.length>4096)throw new ConsoleError(400,"INVALID_PARAMETER","Invalid "+key);return v;};
   const body=(c:Koa.Context)=>{const b=c.request.body as any;if(!b||typeof b!=="object"||Array.isArray(b))throw new ConsoleError(400,"INVALID_BODY","A JSON object is required.");return b;};
   router.get("/files/options",access.wrap(async(c,who)=>{const id=query(c,"projectId");await access.root(who,id,"files");return {downloadHosts:access.project(who,id).downloadHosts||[],uploadBytes:4*1024*1024,downloadBytes:512*1024*1024};}));
@@ -50,19 +51,18 @@ export function installFileRoutes(router:Router, access:Access) {
     if(c.get('if-none-match').split(',').map(v=>v.trim()).includes(file.etag)){c.status=304;return;}
     c.type=file.type;c.body=file.data;
   }));
-  router.post("/uploads",access.wrap(async(c,who)=>{const b=body(c);return uploads.begin(who.uuid,await access.root(who,b.projectId,"files"),b.name,b.size,b.hash);}));
-  router.get("/uploads/:id",access.wrap(async(c,who)=>uploads.status(who.uuid,await access.root(who,query(c,"projectId"),"files"),c.params.id)));
-  router.put("/uploads/:id",access.wrap(async(c,who)=>{
-    const root=await access.root(who,query(c,"projectId"),"files"),data=c.request.body;
-    if(!Buffer.isBuffer(data))throw new ConsoleError(415,"BINARY_REQUIRED","Binary chunk required.");
-    return uploads.append(who.uuid,root,c.params.id,Number(query(c,"offset")),data);
-  }));
-  router.post("/uploads/:id/commit",access.wrap(async(c,who)=>{const b=body(c);return uploads.commit(who.uuid,await access.root(who,b.projectId,"files"),c.params.id);}));
+  const uploadRoot=async(who:Identity,projectId:string,folder:unknown)=>{const root=await access.root(who,projectId,'files');if(projectId!==STORAGE_ID)return root;await storageDirectory(root,folder||'.');return JSON.stringify({root,folder:folder||'.'});};
+  const transfer=(projectId:string)=>projectId===STORAGE_ID?libraryUploads:uploads;
+  router.post('/files/directory',access.wrap(async(c,who)=>{const b=body(c);if(b.projectId!==STORAGE_ID)throw new ConsoleError(400,'STORAGE_REQUIRED','请在我的文件库中新建文件夹。');return makeStorageDirectory(await access.root(who,b.projectId,'files'),b.path||'.',b.name);}));
+  router.post('/uploads',access.wrap(async(c,who)=>{const b=body(c);return transfer(b.projectId).begin(who.uuid,await uploadRoot(who,b.projectId,b.path),b.name,b.size,b.hash);}));
+  router.get('/uploads/:id',access.wrap(async(c,who)=>{const id=query(c,'projectId');return transfer(id).status(who.uuid,await uploadRoot(who,id,c.query.path),c.params.id);}));
+  router.put('/uploads/:id',access.wrap(async(c,who)=>{const id=query(c,'projectId'),root=await uploadRoot(who,id,c.query.path),data=c.request.body;if(!Buffer.isBuffer(data))throw new ConsoleError(415,'BINARY_REQUIRED','Binary chunk required.');return transfer(id).append(who.uuid,root,c.params.id,Number(query(c,'offset')),data);}));
+  router.post('/uploads/:id/commit',access.wrap(async(c,who)=>{const b=body(c),result=await transfer(b.projectId).commit(who.uuid,await uploadRoot(who,b.projectId,b.path),c.params.id);return b.projectId===STORAGE_ID&&b.path&&b.path!=='.'?{...result,path:b.path+'/'+result.path}:result;}));
   router.post("/files/external",access.wrap(async(c,who)=>{
     const b=body(c),root=await access.root(who,b.projectId,"files");
     if(typeof b.url!=="string"||typeof b.name!=="string")throw new ConsoleError(400,"INVALID_DOWNLOAD","A URL and filename are required.");
     if(downloads>=2)throw new ConsoleError(429,"DOWNLOAD_BUSY","外部下载繁忙，请稍后重试。");
     downloads++;try{return await downloadExternal(root,b.name,b.url,access.project(who,b.projectId).downloadHosts||[]);}finally{downloads--;}
   }));
-  return {close(){uploads.clear();images.clear();}};
+  return {close(){uploads.clear();libraryUploads.clear();images.clear();}};
 }

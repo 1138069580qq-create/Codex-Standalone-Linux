@@ -1,3 +1,6 @@
+import {ensureStorage} from './account-storage';
+import {projectReference} from './files';
+import {accountProfile,verifyAccountProfile} from './account-isolation';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -57,7 +60,7 @@ export class DesktopWorkspaceService extends CodexConsoleService {
   override get hasActiveWork(){return this.turnGate.count>0||this.creating.size>0||this.projectWrites.size>0||[...this.attached.values()].some(s=>s.hasActiveWork);}
   override status(identity:Identity):any{
     const base=this.attached.get(this.anchor.threadId)!.status(identity),native=!!this.bridge?.available;
-    return {...base,maxConcurrentTurns:MAIN_TURN_LIMIT,connected:[...this.attached.values()].some(s=>s.desktop.connected),capabilities:{...base.capabilities,switchThreads:native||this.management,createWithMessage:(native||this.management)&&!!identity.uuid,projects:native&&!!this.bridge?.app&&!!identity.uuid,projectless:native&&!!identity.uuid,extensions:native,mcp:native,quota:native,resetQuota:native&&identity.elevated,setGoal:native,taskActions:native,firstMessageExtensions:native},creationMode:native?'desktop-native':'desktop-current-directory'};
+    return {...base,maxConcurrentTurns:MAIN_TURN_LIMIT,connected:[...this.attached.values()].some(s=>s.desktop.connected),capabilities:{...base.capabilities,accountIsolation:this.config.value.accountIsolation===true,switchThreads:native||this.management,createWithMessage:(native||this.management)&&!!identity.uuid,projects:native&&!!this.bridge?.app&&!!identity.uuid,projectless:native&&!!identity.uuid,extensions:native,mcp:native,quota:native,resetQuota:native&&identity.elevated,setGoal:native,taskActions:native,firstMessageExtensions:native},creationMode:native?'desktop-native':'desktop-current-directory'};
   }
   override project(identity:Identity,id:string,capability:'view'|'send'|'approve'|'files'='view'):Project{
     if(id==='projectless'){if(!identity.uuid)throw new ConsoleError(401,'LOGIN_REQUIRED','请登录。');if(!this.config.value.enabled||!this.bridge?.available||!this.projectlessRoot)throw new ConsoleError(503,'PROJECTLESS_UNAVAILABLE','无项目对话接口尚未连接。');if(capability==='files')throw new ConsoleError(403,'PROJECTLESS_FILES','无项目对话不开放项目文件浏览。');return {id,name:'无项目对话',root:this.projectlessRoot,ownerId:identity.uuid,grants:[]};}
@@ -182,6 +185,7 @@ export class DesktopWorkspaceService extends CodexConsoleService {
     if(!this.management||!this.tools)throw new ConsoleError(501,'DESKTOP_MANAGEMENT_UNAVAILABLE','桌面任务管理接口不可用。');
     if(!/^[-a-zA-Z0-9_]{8,100}$/.test(input?.requestId||'')||typeof input.text!=='string'||!input.text.trim()||input.text.length>64000)throw new ConsoleError(400,'INVALID_MESSAGE','请输入消息并提供有效请求 ID。');
     if(input.environment!=='local'||input.confirmCurrentDirectory!==true)throw new ConsoleError(400,'DIRECTORY_CONFIRMATION_REQUIRED','请确认在当前项目目录创建任务。');
+    if(this.config.value.accountIsolation)throw new ConsoleError(503,'ISOLATION_UNAVAILABLE','当前旧版创建接口不支持账号隔离。');
     if(input.attachments?.length||input.references?.length||input.extensions?.length)throw new ConsoleError(400,'DESKTOP_FIRST_MESSAGE_TEXT_ONLY','新任务首条消息仅支持文本；创建后可继续添加附件。');
     const overrides=input.settingsOverrides||[];if(!Array.isArray(overrides)||overrides.some((v:any)=>!['model','effort'].includes(v)))throw new ConsoleError(400,'DESKTOP_NEW_SETTINGS','新任务权限和模式使用桌面设置；此处只能选择模型及强度。');
     const fingerprint=createHash('sha256').update(JSON.stringify({projectId,text:input.text,model:input.model,effort:input.effort,overrides,environment:input.environment})).digest('hex'),key=`${identity.uuid}:${input.requestId}`;
@@ -225,12 +229,13 @@ export class DesktopWorkspaceService extends CodexConsoleService {
     const project=this.project(identity,projectId,'send');
     if(typeof input.text!=='string'||!input.text.trim()||input.text.length>64000||!/^[-a-zA-Z0-9_]{8,100}$/.test(input.requestId||''))throw new ConsoleError(400,'INVALID_MESSAGE','请输入消息并提供有效请求 ID。');
     if(input.environment!=='local'||input.confirmCurrentDirectory!==true)throw new ConsoleError(400,'DIRECTORY_CONFIRMATION_REQUIRED','请确认聊天的工作目录。');
-    if(input.attachments?.length||input.references?.length)throw new ConsoleError(400,'DESKTOP_NEW_ATTACHMENTS','首条消息可选技能、插件；文件附件请在创建后添加。');
+    if(input.attachments?.length)throw new ConsoleError(400,'DESKTOP_NEW_ATTACHMENTS','首条消息请引用服务器文件库中的原文件。');if(input.references!==undefined&&(!Array.isArray(input.references)||input.references.length>12||input.references.some((r:unknown)=>typeof r!=='string'||!r.startsWith('@account/'))))throw new ConsoleError(400,'INVALID_REFERENCES','首条消息仅支持本账号文件库引用。');
     const overrides=input.settingsOverrides||[];if(!Array.isArray(overrides)||overrides.some((k:any)=>!['model','effort','mode','access'].includes(k)))throw new ConsoleError(400,'INVALID_SETTINGS','无效的新任务设置。');
     const fingerprint=createHash('sha256').update(JSON.stringify({projectId,input})).digest('hex'),key=identity.uuid+':'+input.requestId,prior=this.creations.get(key);
     if(prior){if(prior.fingerprint!==fingerprint)throw new ConsoleError(409,'CREATION_CHANGED','该请求 ID 已用于另一条消息。');return this.result(identity,await(this.creating.get(key)||prior));}
     if(this.creations.size>=500)throw new ConsoleError(429,'CREATION_LIMIT','创建记录已达上限。');
     const content:any[]=[{type:'text',text:input.text,text_elements:[]}];
+    if(input.references?.length){if(!this.config.value.accountIsolation)throw new ConsoleError(503,'STORAGE_ISOLATION_REQUIRED','服务器尚未启用账号隔离文件库。');const root=await ensureStorage(this.config.file,identity);for(const ref of input.references)content[0].text+='\n\nAccount file reference (server original): '+path.join(root,await projectReference(root,ref.slice(9)));}
     if(input.extensions!==undefined&&(!Array.isArray(input.extensions)||input.extensions.length>12))throw new ConsoleError(400,'INVALID_EXTENSIONS','最多选择 12 个技能或插件。');
     if(input.extensions?.length)content.push(...resolveExtensions(await this.featureCatalog(project.root,true),input.extensions));
     if(projectId!=='projectless'&&await fs.realpath(project.root).catch(()=>null)!==project.root)throw new ConsoleError(409,'ROOT_CHANGED','项目目录已改变，请重新选择。');
@@ -249,7 +254,8 @@ export class DesktopWorkspaceService extends CodexConsoleService {
     const work=(async()=>{try{await this.save();
       const cwd=projectId==='projectless'?(await this.bridge!.host('projectless-thread-cwd',{createSplitDirectories:false,prompt:input.text.slice(0,120)})).cwd:project.root;
       if(typeof cwd!=='string'||!path.isAbsolute(cwd)||projectId==='projectless'&&!isWithin(this.projectlessRoot,await fs.realpath(cwd)))throw new Error('Unexpected projectless workspace');
-      const created=await this.bridge!.rpc('thread/start',{...start,cwd,runtimeWorkspaceRoots:[cwd]});const t=created.thread;
+      const isolated=this.config.value.accountIsolation?await accountProfile(this.config,identity,cwd,input.access,(m,p)=>this.bridge!.rpc(m,p)):null;
+      const created=await this.bridge!.rpc('thread/start',{...start,cwd,runtimeWorkspaceRoots:[cwd],...(isolated?{approvalPolicy:'never',config:isolated.config}:{})});if(isolated){verifyAccountProfile(created,isolated);delete turnOverrides.sandboxPolicy;turnOverrides.approvalPolicy='never';}const t=created.thread;
       if(!validId(t?.id)||await fs.realpath(t.cwd)!==await fs.realpath(cwd))throw new Error('Unexpected created task');
       this.usage?.bind(t.id,identity,projectId,start.model||created.model||t.model,t.modelProvider,true);
       slot.bind(t.id);row.threadId=t.id;row.status='ready';row.messageAccepted=false;
@@ -267,6 +273,7 @@ export class DesktopWorkspaceService extends CodexConsoleService {
   override async taskAction(identity:Identity,projectId:string,id:string,action:string,input:any):Promise<any>{
     const project=this.project(identity,projectId,'send');if(!this.bridge?.available)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','桌面功能接口未连接。');
     const session=await this.session(identity,projectId,id);
+    if(this.config.value.accountIsolation&&['review','compact'].includes(action))throw new ConsoleError(503,'ISOLATED_ACTION_UNAVAILABLE','隔离模式暂不支持此后台模型操作，请在普通消息中提出请求。');
 
     if(!['rename','pin','archive','fork','side','compact','review','feedback'].includes(action))throw new ConsoleError(400,'INVALID_ACTION','未知操作。');
     if(!/^[-a-zA-Z0-9_]{8,100}$/.test(input.requestId||''))throw new ConsoleError(400,'INVALID_REQUEST_ID','无效请求 ID。');

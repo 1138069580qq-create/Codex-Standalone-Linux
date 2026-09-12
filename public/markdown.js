@@ -1,6 +1,6 @@
 /* Small safe Markdown renderer. All model content is text/DOM, never trusted HTML. */
 (function(scope){
-  function render(text,{link,image}={}){
+  function render(text,{link,image,headingOffset=1}={}){
     const root=document.createElement('div');root.className='message-markdown';
     function appendInline(parent,value,depth=0){
       if(depth>4){parent.append(document.createTextNode(value));return;}
@@ -29,9 +29,15 @@
       const line=lines[i],fence=line.match(/^\s*(\x60{3,}|~{3,})([\w-]*)\s*$/);
       if(fence){flush();const code=[],marker=fence[1];while(++i<lines.length&&!lines[i].trimStart().startsWith(marker))code.push(lines[i]);const pre=document.createElement('pre'),node=document.createElement('code');node.textContent=code.join('\n');pre.append(node);root.append(pre);continue;}
       if(!line.trim()){flush();continue;}
+      const splitCells=value=>value.trim().replace(/^\||\|$/g,'').split(/(?<!\\)\|/).map(v=>v.trim().replace(/\\\|/g,'|'));
+      if(line.includes('|')&&i+1<lines.length&&/^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[i+1])){
+        flush();const headers=splitCells(line).slice(0,64),table=document.createElement('table'),head=document.createElement('thead'),tr=document.createElement('tr');for(const value of headers){const th=document.createElement('th');appendInline(th,value);tr.append(th);}head.append(tr);table.append(head);const body=document.createElement('tbody');i++;
+        while(i+1<lines.length&&lines[i+1].includes('|')&&lines[i+1].trim()){const row=document.createElement('tr'),cells=splitCells(lines[++i]);for(let n=0;n<headers.length;n++){const td=document.createElement('td');appendInline(td,cells[n]||'');row.append(td);}body.append(row);}table.append(body);root.append(table);continue;
+      }
+      if(/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)){flush();root.append(document.createElement('hr'));continue;}
       const heading=line.match(/^(#{1,6})\s+(.+)$/),bullet=line.match(/^\s*(?:([-*+])|\d+[.)])\s+(.+)$/);
-      if(heading){flush();const h=document.createElement('h'+Math.min(heading[1].length+1,6));appendInline(h,heading[2]);root.append(h);}
-      else if(bullet){if(paragraph.length)flush();const type=bullet[1]?'UL':'OL';if(!list||list.tagName!==type){list=document.createElement(type.toLowerCase());root.append(list);}const li=document.createElement('li');appendInline(li,bullet[2]);list.append(li);}
+      if(heading){flush();const h=document.createElement('h'+Math.max(1,Math.min(heading[1].length+headingOffset,6)));appendInline(h,heading[2]);root.append(h);}
+      else if(bullet){if(paragraph.length)flush();const type=bullet[1]?'UL':'OL';if(!list||list.tagName!==type){list=document.createElement(type.toLowerCase());root.append(list);}const li=document.createElement('li'),task=bullet[2].match(/^\[([ xX])\]\s+(.+)$/);if(task){const check=document.createElement('input');check.type='checkbox';check.disabled=true;check.checked=task[1].toLowerCase()==='x';li.append(check);appendInline(li,task[2]);}else appendInline(li,bullet[2]);list.append(li);}
       else if(/^>\s?/.test(line)){flush();const quote=document.createElement('blockquote');appendInline(quote,line.replace(/^>\s?/,''));root.append(quote);}
       else{list=null;paragraph.push(line);}
     }flush();return root;

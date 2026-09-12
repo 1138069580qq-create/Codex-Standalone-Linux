@@ -1,3 +1,4 @@
+import {fakeHistoryReader} from './fixtures/history-peer';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir } from "node:fs/promises";
@@ -62,7 +63,7 @@ async function fixture() {
   const service = new CodexConsoleService(
     config,
     new CommandReceipts(path.join(root, "receipts.json")),
-    () => peer as any
+    () => peer as any, fakeHistoryReader((m,p)=>peer.request(m,p))
   );
   await service.connect();
   return {

@@ -1,14 +1,11 @@
-# Standalone project instructions
+# 项目规则
 
-- Do not modify or depend on the original ElementsPanel project.
-- Do not build the project or run a dev server; the UI is static and production runs through `npm start`.
-- Run type checking with `npm run check` (`tsc --noEmit`), regression tests with `npm test`.
-- The application is attach-only. Never add automatic Codex process launch or credential scraping.
-- Real integration tests are opt-in and must be distinguished from protocol mocks and skipped checks.
-- Do not recursively or bulk-delete files or directories. Retain test temporary directories for inspection.
-- If an i18n directory is introduced, every new translation key must be added to all language files.
-
-- User testing preference: reduce testing rounds, tool calls, and repetitive output, NOT coverage, test count, acceptance criteria, or quality. Finish a coherent batch of edits, then run all required checks in one script or a few grouped calls. Keep full logs and return only summaries/failures. Fix discovered issues together; rerun failures and affected regressions, with a final combined full run only when needed. Do not repeatedly run the whole suite after tiny edits.
-- Do not use subagents for this project unless the user explicitly reverses that restriction. Do not submit real model messages or create real desktop tasks just for testing without a fresh explicit request.
-
-- 排查与信息收集同样减少轮次、工具调用和重复输出：先形成假设，再集中读取关联代码、日志和运行状态；复用已取得的证据，只针对证据缺口追加检查。不得以减少次数为由跳过关键根因或安全验证。
+- 减少重复搜索、读写、调用、测试轮次和输出，不降低验收、安全、根因分析与质量。先形成假设，批量处理相关工作，复用证据；修复后先验证失败项及受影响范围，必要时扩大检查。保留完整日志，只汇报结果、问题和决定，不把未运行项算作通过。
+- 简单、独立、边界明确且可核验的工作可按需交给多个子代理并行，优先 `luna_worker`；以提升效率、保证质量和降低总消耗为准，避免重复工作和文件冲突，返回简短结论和证据路径。不嵌套委派或自行扩围。主代理负责设计、复杂修改、安全、整合和最终验收。
+- 延续本任务已有授权，不重复确认；仅在超出范围或缺少必要信息时询问。真实模型测试需任务授权，必要的修复与复测沿用授权；区分真实调用、模拟和跳过项，使用测试数据，不输出凭据。
+- 已授权的部署直接推进：核对目标与版本，验证补丁，备份代码和配置，准备健康检查及回滚；只重启获授权的服务。
+- 保持项目独立，不依赖或修改 ElementsPanel。仅连接已有 Codex，不自动启动其进程或搜刮凭据。
+- 静态 UI 不做无必要的构建或启动开发服务器。沿用现有检查、测试和打包流程；类型检查使用 `npm run check`，相关回归使用 `npm test`，原生窗口另行验证。新增国际化键须覆盖全部语言。
+- 禁止通过递归、通配符、循环或脚本批量删除。每次仅删除一个已核验的明确文件；确需批量清理时请用户手动处理。保留测试产物。
+- Windows 新项目放 `D:/Documents/ChatGPT`，产物、下载、缓存和临时文件放 `D:/WorkData/StarPack` 对应目录；保留现有 D/E 布局。WSL 工具用 `/mnt/d/...`，Windows 程序用 Windows 路径；执行前核对工作目录、输入输出和子进程临时/缓存位置。
+- Linux 服务器沿用现有部署、数据与服务用户目录，明确暂存和备份位置及权限，不套用 Windows 盘符规则。避免新增 C 盘工作数据；确有必要的大量写入先说明原因与替代方案。迁移须核验两端、保留可恢复副本，并离线处理运行中的应用数据。

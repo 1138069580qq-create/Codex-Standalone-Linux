@@ -1,3 +1,5 @@
+import {isolateAccountThread} from './account-isolation';
+import {ensureStorage} from './account-storage';
 import path from 'node:path';
 import { CodexConsoleService } from './service';
 import { MAIN_TURN_LIMIT } from './concurrency';
@@ -105,14 +107,15 @@ export class DesktopSessionService extends CodexConsoleService {
   override async goal(identity:Identity,projectId:string,id:string,objective?:string):Promise<any>{this.requireCurrent(identity,projectId,id);if(objective!==undefined)throw new ConsoleError(501,'DESKTOP_API_UNAVAILABLE','请在桌面中设置目标。');return {goal:this.desktop.state.threadGoal||null};}
   override async send(identity:Identity,projectId:string,id:string,input:any):Promise<any>{
     const project=this.requireCurrent(identity,projectId,id,'send');
+    if(this.config.value.accountIsolation&&input?.delivery==='steer')throw new ConsoleError(409,'ISOLATED_TURN_REQUIRED','请等待当前轮结束后发送。');
     if(input?.delivery!==undefined&&input.delivery!=='steer')throw new ConsoleError(400,'INVALID_DELIVERY','不支持的发送方式。');
     if(typeof input?.text!=='string'||!input.text.trim()||input.text.length>64000||!/^[-a-zA-Z0-9_]{8,100}$/.test(input.requestId))throw new ConsoleError(400,'INVALID_MESSAGE','无效的消息。');
     if(input.extensions!==undefined&&(!Array.isArray(input.extensions)||input.extensions.length>12))throw new ConsoleError(400,'INVALID_EXTENSIONS','最多选择 12 个技能或插件。');
     const content:any[]=[{type:'text',text:input.text,text_elements:[]}];
     if(input.extensions?.length)content.push(...resolveExtensions(await this.extensionCatalog(project.root,true),input.extensions));
-    if(input.attachments?.length||input.references?.length){this.requireCurrent(identity,projectId,id,'files');
+    if(input.attachments?.length||input.references?.length){if(input.attachments?.length||input.references?.some((r:unknown)=>typeof r!=='string'||!r.startsWith('@account/')))this.requireCurrent(identity,projectId,id,'files');
       if(!Array.isArray(input.attachments)||input.attachments.length>5||!Array.isArray(input.references)||input.references.length>12)throw new ConsoleError(400,'INVALID_ATTACHMENTS','附件数量无效。');
-      for(const ref of input.references)content[0].text+='\n\nProject reference: '+await projectReference(project.root,ref);
+      for(const ref of input.references){if(typeof ref!=='string')throw new ConsoleError(400,'INVALID_REFERENCES','无效的引用。');if(ref.startsWith('@account/')){if(!this.config.value.accountIsolation)throw new ConsoleError(503,'STORAGE_ISOLATION_REQUIRED','服务器尚未启用账号隔离文件库。');const root=await ensureStorage(this.config.file,identity),rel=await projectReference(root,ref.slice(9));content[0].text+='\n\nAccount file reference (server original): '+path.join(root,rel);}else content[0].text+='\n\nProject reference: '+await projectReference(project.root,ref);}
       for(const ref of input.attachments){const full=await attachmentPath(project.root,ref);if(/\.(png|jpe?g|webp)$/i.test(full))content.push({type:'localImage',path:full});else content[0].text+='\n\nAttached project file: '+ref;}
     }
     return this.receipts.run(`${identity.uuid}:desktop:${id}:${input.requestId}`,async markSubmitted=>{
@@ -128,10 +131,11 @@ export class DesktopSessionService extends CodexConsoleService {
       const wantsModel=Array.isArray(input.settingsOverrides)&&input.settingsOverrides.some((k:string)=>['model','effort','mode'].includes(k));
       const data=wantsModel?(await this.models(identity)).data:[];
       const overrides=desktopOverrides(this.desktop.state,input,data,identity,project.root);
+      if(this.config.value.accountIsolation){if(!this.bridge?.available)throw new ConsoleError(503,'ISOLATION_UNAVAILABLE','当前后端不支持账号隔离。');await isolateAccountThread(this.config,identity,project.root,id,input.access,(m,p)=>this.bridge!.rpc(m,p));delete overrides.sandboxPolicy;overrides.approvalPolicy='never';}
       const slot=await this.turnGate.acquire(id);
       let outcome:'running'|'complete'|'unknown'='unknown';
       try { slot.submit();markSubmitted();
-      const response=await this.desktop.request('thread-follower-start-turn',{conversationId:id,turnStart:{request:{threadId:id,clientUserMessageId:input.requestId,input:content,...overrides},context:{inheritThreadSettings:true}}},2);
+      const response=this.config.value.accountIsolation?{result:await this.bridge!.rpc('turn/start',{threadId:id,clientUserMessageId:input.requestId,input:content,...overrides})}:await this.desktop.request('thread-follower-start-turn',{conversationId:id,turnStart:{request:{threadId:id,clientUserMessageId:input.requestId,input:content,...overrides},context:{inheritThreadSettings:true}}},2);
       this.update();const turn=response.result?.result?.turn||response.result?.turn;
       const turnId=turn?.id||this.turns().at(-1)?.turnId;
       outcome=turn?.status&&runtimeStatus(turn)!=='running'?'complete':'running';slot.finish(outcome,turnId);

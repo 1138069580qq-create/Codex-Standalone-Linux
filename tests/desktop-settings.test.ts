@@ -96,3 +96,5 @@ test('desktop immediate send uses guarded turn/steer and preserves the active mo
  await assert.rejects(service.send(admin,'demo','task',{...input,requestId:'desktop-steer-002',expectedTurnId:'stale'}),/轮次已改变/);
  }finally{service.disconnect();}
 });
+
+test("ordinary task settings preserve next-message overrides",async()=>{const {c,S,elements}=ui();S.attachedThreadId=null;S.user={id:"u"};await c.loadModels();assert.equal(elements.model.value,"current");elements.model.value="next";c.markSettings("model");c.applyThreadSettings({...desktopSettings(state()),model:"current"});assert.equal(elements.model.value,"next");assert.match(elements["settings-source"].textContent,/下一条：next/);});

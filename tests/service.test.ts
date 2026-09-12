@@ -1,3 +1,5 @@
+import {fakeHistoryReader} from './fixtures/history-peer';
+import {CodexRpcError} from '../src/backend/transport';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -138,7 +140,7 @@ async function fixture(): Promise<Fixture> {
     { id: "thread-bravo", cwd: roots.bravo, status: "idle", name: "Bravo thread" }
   ]);
   const receipts = new CommandReceipts(path.join(dir, "receipts.json"));
-  const service = new CodexConsoleService(config, receipts, () => peer as any);
+  const service = new CodexConsoleService(config, receipts, () => peer as any, fakeHistoryReader((m,p)=>peer.request(m,p)));
   await service.connect();
   return { service, peer, identity, roots };
 }
@@ -415,4 +417,28 @@ test('a previously cached empty session can recover context later without starti
  const next=await service.snapshot(identity,'alpha','thread-alpha');assert.equal(next.tokenUsage?.last,25000);assert.equal(next.tokenUsage?.contextWindow,100000);assert.equal(peer.requests.some(r=>r.method==='turn/start'),false);
  peer.emit('notification',{method:'thread/tokenUsage/updated',params:{threadId:'thread-alpha',tokenUsage:{total:{totalTokens:900000},last:{totalTokens:0},modelContextWindow:100000}}});
  assert.equal((await service.snapshot(identity,'alpha','thread-alpha')).tokenUsage?.last,0,'live compacted context beats stale history');
+});
+
+
+test('legacy history is read only after project verification and preserves both task histories',async t=>{
+  const {service,peer,identity}=await fixture();t.after(()=>service.disconnect());const original=peer.request.bind(peer);
+  peer.request=async(method:string,params:any)=>{if(method==='thread/turns/list')throw new CodexRpcError(-32601,'old protocol');const result:any=await original(method,params);if(method==='thread/read'&&params.includeTurns)result.thread={...result.thread,turns:[{id:'turn-'+params.threadId,status:'completed',items:[{id:'item-'+params.threadId,type:'agentMessage',text:params.threadId}]}]};return result;};
+  for(const project of ['alpha','bravo']){const snapshot=await service.snapshot(identity,project,'thread-'+project);assert.ok(snapshot.items.some(i=>i.text==='thread-'+project));}
+  await assert.rejects(service.snapshot(identity,'alpha','thread-bravo'),hasCode('THREAD_FORBIDDEN'));
+  assert.equal(peer.turnStarts.length,0);
+});
+test('concurrent history readers wait for attachment instead of receiving an incomplete empty session',async t=>{
+  const {service,peer,identity}=await fixture();t.after(()=>service.disconnect());const original=peer.request.bind(peer);
+  let release!:(v:any)=>void,started!:()=>void;const history=new Promise(r=>release=r),ready=new Promise<void>(r=>started=r);
+  peer.request=async(method:string,params:any)=>{if(method==='thread/turns/list'){started();return history as any;}return original(method,params);};
+  const a=service.snapshot(identity,'alpha','thread-alpha');await ready;let completed=false;const b=service.snapshot(identity,'alpha','thread-alpha').then(v=>{completed=true;return v;});await new Promise(r=>setTimeout(r,25));assert.equal(completed,false);
+  release({data:[{id:'turn',status:'completed',items:[{id:'item',type:'agentMessage',text:'history ready'}]}]});for(const v of await Promise.all([a,b]))assert.ok(v.items.some(i=>i.text==='history ready'));
+});
+
+test('one oversized task history leaves service and other project tasks connected',async t=>{
+ const {service,peer,identity}=await fixture();t.after(()=>service.disconnect());const request=peer.request.bind(peer);
+ peer.request=async(method:string,params:any)=>{if(method==='thread/turns/list'&&params.threadId==='thread-alpha')throw Object.assign(new RangeError('Max payload size exceeded'),{code:'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH'});return request(method,params);};
+ await assert.rejects(service.snapshot(identity,'alpha','thread-alpha'),hasCode('HISTORY_TOO_LARGE'));assert.equal(service.status(identity).connected,true);
+ const other=await service.snapshot(identity,'bravo','thread-bravo');assert.equal(other.id,'thread-bravo');assert.equal(service.status(identity).connected,true);
+ assert.equal(peer.requests.some(r=>r.method==='turn/start'),false);
 });

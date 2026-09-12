@@ -1,3 +1,6 @@
+import {accountProfile,verifyAccountProfile,isolateAccountThread} from './account-isolation';
+import {STORAGE_ID,storagePath,ensureStorage} from './account-storage';
+import { IsolatedHistoryReader } from './history-reader';
 import { promises as fs } from "fs";
 import { randomUUID, createHash } from "crypto";
 import path from "node:path";
@@ -37,6 +40,7 @@ interface Session {
   root?:string;
   tokenUsage?: TokenUsage|null;
   contextReadAt?: number;
+  historyWarning?: {code:string;message:string};
   id: string;
   projectId: string;
   title: string;
@@ -100,7 +104,8 @@ export class CodexConsoleService {
   constructor(
     readonly config: ConfigStore,
     readonly receipts: CommandReceipts,
-    private factory = (options: any) => new CodexRpcClient(options)
+    private factory = (options: any) => new CodexRpcClient(options),
+    private historyReader = new IsolatedHistoryReader()
   ) {}
   status(identity: Identity) {
     return {
@@ -113,7 +118,7 @@ export class CodexConsoleService {
       userId: identity.uuid,
       admin: identity.elevated,
       reason: this.peer?.connected ? undefined : this.reason,
-      capabilities:{projects:!!identity.uuid,projectless:!!identity.uuid,taskActions:true,quota:true,resetQuota:!!identity.uuid&&identity.elevated},
+      capabilities:{accountIsolation:this.config.value.accountIsolation===true,projects:!!identity.uuid,projectless:!!identity.uuid,taskActions:true,quota:true,resetQuota:!!identity.uuid&&identity.elevated},
       maxConcurrentTurns: MAIN_TURN_LIMIT
     };
   }
@@ -179,6 +184,7 @@ export class CodexConsoleService {
       if (this.peer !== peer) return;
       this.flushDeltas();
       this.pending.clear();
+      this.historyReader.cancelAll();
       this.sessions.clear();
       this.opening.clear();
       this.reservations.clear();
@@ -204,6 +210,7 @@ export class CodexConsoleService {
     }
   }
   disconnect(): void {
+    this.historyReader.cancelAll();
     this.flushDeltas();
     const old = this.peer;
     this.peer = undefined;
@@ -230,6 +237,7 @@ export class CodexConsoleService {
   ): Project {
     if (!this.config.value.enabled)
       throw new ConsoleError(409, "DISABLED", "Codex console is disabled.");
+    if(id===STORAGE_ID){if(!['view','files'].includes(capability))throw new ConsoleError(403,'STORAGE_FILES_ONLY','文件库仅保存文件，请在对话中引用。');return {id,name:'我的文件库',root:storagePath(this.config.file,identity),ownerId:identity.uuid,grants:[]};}
     if(id==='projectless'){if(!identity.uuid)throw new ConsoleError(401,'LOGIN_REQUIRED','请登录。');if(capability==='files')throw new ConsoleError(403,'PROJECTLESS_FILES','无项目对话不开放项目文件浏览。');return {id,name:'无项目对话',root:path.dirname(this.config.file)+'-chats'+(identity.uuid===this.config.value.defaultOwnerId?'':'-'+accountDirectoryName(identity.uuid)),ownerId:identity.uuid,grants:[]};}
     return requireProject(this.config.value, identity, id, capability);
   }
@@ -245,6 +253,7 @@ export class CodexConsoleService {
     const project=this.project(identity,projectId,'send');const thread=await this.verifyThread(project,id);
     if(!['rename','pin','archive','fork','side','compact','review','feedback'].includes(action)||!/^[-a-zA-Z0-9_]{8,100}$/.test(input.requestId||''))throw new ConsoleError(400,'INVALID_ACTION','无效的操作或请求 ID。');
 
+    if(this.config.value.accountIsolation&&['compact','review'].includes(action))throw new ConsoleError(409,'ISOLATED_ACTION_UNAVAILABLE','账号隔离模式下，请通过普通对话提交请求。');
     if(!['rename','pin'].includes(action)&&input.confirmed!==true)throw new ConsoleError(400,'CONFIRMATION_REQUIRED','请确认操作。');
     if(['archive','fork','side','compact','review'].includes(action)&&runtimeStatus(thread)==='running')throw new ConsoleError(409,'THREAD_BUSY','请等待当前消息结束。');
     if(action==='rename'&&(typeof input.name!=='string'||!input.name.trim()||input.name.length>120))throw new ConsoleError(400,'INVALID_TITLE','标题为 1–120 字。');
@@ -431,13 +440,14 @@ export class CodexConsoleService {
     // Do not unsubscribe/unload desktop-owned work just because a browser changes projects.
   }
   private async open(project: Project, id: string): Promise<Session> {
+    // A loading session already exists for live events, but is not a usable snapshot yet.
+    const inFlight = this.opening.get(id);
+    if (inFlight) return inFlight;
     const current = this.sessions.get(id);
     if (current && current.projectId === project.id) {
       current.touched = Date.now();
       return current;
     }
-    const inFlight = this.opening.get(id);
-    if (inFlight) return inFlight;
     const promise = (async () => {
       const thread = await this.verifyThread(project, id);
       this.evict();
@@ -461,12 +471,9 @@ export class CodexConsoleService {
         session.status = runtimeStatus(resumed.thread || thread);
         const restored=await restoredTokenUsage({...thread,...resumed.thread});
         if(!session.tokenUsage)session.tokenUsage=restored;
-        const history = await this.rpc().request<any>("thread/turns/list", {
-          threadId: id,
-          limit: 20,
-          sortDirection: "desc",
-          itemsView: "full"
-        });
+        const owner=this.peer;
+        const history = await this.historyReader.read(this.config.value.transport,id,()=>this.peer===owner&&!!owner?.connected);
+        session.historyWarning=history.warning;
         const live = new Map(session.items);
         session.items.clear();
         for (const turn of [...(history.data || [])].reverse()) {
@@ -482,7 +489,7 @@ export class CodexConsoleService {
         this.trim(session);
         return session;
       } catch (error) {
-        this.sessions.delete(id);
+        if(this.sessions.get(id)===session)this.sessions.delete(id);
         throw error;
       }
     })();
@@ -490,7 +497,7 @@ export class CodexConsoleService {
     try {
       return await promise;
     } finally {
-      this.opening.delete(id);
+      if(this.opening.get(id)===promise)this.opening.delete(id);
     }
   }
   async snapshot(identity: Identity, projectId: string, id: string) {
@@ -514,6 +521,7 @@ export class CodexConsoleService {
       status: session.status,
       turnId: session.turnId,
       items: [...session.items.values()],
+      ...(session.historyWarning?{historyWarning:session.historyWarning}:{}),
       turns: [...session.turns.values()],
       tokenUsage: session.tokenUsage,
       metrics: this.usageSnapshot(id),
@@ -540,14 +548,16 @@ export class CodexConsoleService {
     if (requestId !== undefined && (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(requestId)))
       throw new ConsoleError(400, "INVALID_REQUEST_ID", "Invalid request ID.");
     const create = async () => {
+    const isolated=this.config.value.accountIsolation?await accountProfile(this.config,identity,project.root,undefined,(m,p)=>this.rpc().request(m,p)):null;
     const result = await this.rpc().request<any>("thread/start", {
       cwd: project.root,
       runtimeWorkspaceRoots: [project.root],
       ...(projectId==="projectless"?{projectId:null,threadSource:"user"}:{}),
-      approvalPolicy: "on-request",
+      approvalPolicy: isolated?"never":"on-request",
       approvalsReviewer: "user",
-      sandbox: "workspace-write"
+      ...(isolated?{config:isolated.config}:{sandbox:"workspace-write"})
     });
+    if(isolated){verifyAccountProfile(result,isolated);}
     const thread = result.thread;
     if (!(await this.sameRoot(project, thread.cwd)))
       throw new ConsoleError(502, "ROOT_MISMATCH", "Codex returned a different working directory.");
@@ -576,6 +586,7 @@ export class CodexConsoleService {
   }
   async send(identity: Identity, projectId: string, id: string, input: any) {
     const project = this.project(identity, projectId, "send");
+    if(this.config.value.accountIsolation&&input?.delivery==="steer")throw new ConsoleError(409,"ISOLATED_TURN_REQUIRED","请等待当前轮结束后发送，账号隔离不允许中途切换权限。");
     if(input?.delivery!==undefined && input.delivery!=="steer")throw new ConsoleError(400,"INVALID_DELIVERY","不支持的发送方式。");
     if (
       !input ||
@@ -609,7 +620,7 @@ export class CodexConsoleService {
         "EFFORT_UNAVAILABLE",
         "This reasoning level is not supported by the selected model."
       );
-    const policy=accessPolicy(identity,project.root,input.access,input.confirmFullAccess);
+    const policy=this.config.value.accountIsolation?{approvalPolicy:"never"}:accessPolicy(identity,project.root,input.access,input.confirmFullAccess);
     const content: any[] = [{ type: "text", text: input.text }];
     if (input.extensions !== undefined) {
       // Refresh before a send so revoked or disabled skills cannot be selected from a stale browser cache.
@@ -620,9 +631,10 @@ export class CodexConsoleService {
     if (input.references !== undefined) {
       if (!Array.isArray(input.references) || input.references.length > 12 || input.references.some((v: unknown)=>typeof v!=="string"))
         throw new ConsoleError(400,"INVALID_REFERENCES","最多引用 12 个文件或文件夹。");
-      if (input.references.length) this.project(identity,projectId,"files");
-      for(const rel of [...new Set<string>(input.references)])
-        content[0].text += `\n\nProject reference: ${await projectReference(project.root,rel)}`;
+      for(const rel of [...new Set<string>(input.references)]) {
+        if(rel.startsWith('@account/')){if(!this.config.value.accountIsolation)throw new ConsoleError(503,'STORAGE_ISOLATION_REQUIRED','服务器尚未启用账号隔离文件库。');const root=await ensureStorage(this.config.file,identity),name=await projectReference(root,rel.slice(9));content[0].text += `\n\nAccount file reference (server original): ${path.join(root,name)}`;}
+        else{this.project(identity,projectId,"files");content[0].text += `\n\nProject reference: ${await projectReference(project.root,rel)}`;}
+      }
     }
     if (
       input.attachments !== undefined &&
@@ -684,6 +696,7 @@ export class CodexConsoleService {
             "A task is already running in this project, possibly in another Codex client."
           );
         const peer = this.rpc();
+        if(this.config.value.accountIsolation)await isolateAccountThread(this.config,identity,project.root,id,input.access,(m,p)=>peer.request(m,p));
         this.usage?.bind(id,identity,projectId,model.model,thread.modelProvider,false,thread.serviceTier);
         markSubmitted(); slot.submit(); outcome = 'unknown';
         const result = await peer.request<any>("turn/start", {

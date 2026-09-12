@@ -1,3 +1,4 @@
+import {CodexRpcError} from '../src/backend/transport';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -21,7 +22,7 @@ test('desktop bridge batch: local-only transport, structured RPC, public events,
   const context=vm.createContext({window,Set,JSON,Promise,MessageChannel,Error,setTimeout,clearTimeout});
   wss.on('connection',ws=>{socket=ws;ws.on('message',async raw=>{const m=JSON.parse(raw.toString());try{let result:any={};if(m.method==='Runtime.addBinding')window[m.params.name]=(payload:string)=>ws.send(JSON.stringify({method:'Runtime.bindingCalled',params:{name:m.params.name,payload}}));if(m.method==='Runtime.evaluate')result={result:{value:await vm.runInContext(m.params.expression,context)}};ws.send(JSON.stringify({id:m.id,result}));}catch{ws.send(JSON.stringify({id:m.id,result:{exceptionDetails:{text:'failed'}}}));}});});
   const bridge=new DesktopBridge((server.address() as any).port);
-  try{await bridge.connect();assert.equal(bridge.available,true);await bridge.rpc('skills/list',{cwds:['test']});await bridge.rpc('account/read',{extra:'must-not-forward'});assert.deepEqual(JSON.parse(JSON.stringify(sent.find(m=>m.request?.method==='account/read').request.params)),{refreshToken:false});await assert.rejects(bridge.rpc('account/read',{refreshToken:true}),/令牌/);await bridge.host('list-pinned-threads',{});await assert.rejects(bridge.rpc('config/read',{}),/不允许/);await assert.rejects(bridge.host('set-global-state',{}),/不允许/);await assert.rejects(bridge.rpc('feedback/upload',{}),e=>!String(e).includes('SECRET'));
+  try{await bridge.connect();assert.equal(bridge.available,true);await bridge.rpc('skills/list',{cwds:['test']});await bridge.rpc('account/read',{extra:'must-not-forward'});assert.deepEqual(JSON.parse(JSON.stringify(sent.find(m=>m.request?.method==='account/read').request.params)),{refreshToken:false});await assert.rejects(bridge.rpc('account/read',{refreshToken:true}),/令牌/);await bridge.host('list-pinned-threads',{});await bridge.rpc('config/read',{includeLayers:false});await assert.rejects(bridge.rpc('config/value/write',{}),/不允许/);await assert.rejects(bridge.host('set-global-state',{}),/不允许/);await assert.rejects(bridge.rpc('feedback/upload',{}),e=>!String(e).includes('SECRET'));
     const native=await bridge.app('projects.list',{});assert.equal(native.saved.name,'Native project');
     const created=await bridge.app('projects.create',{name:'New',root:'/project'});assert.equal(created.projectId,'saved');assert.deepEqual(appCalls[0],{appearance:null,initializeDefaultWorkspaceGitRepository:false,name:'New',sources:['/project']});
     await bridge.app('threads.assignProject',{threadId:'task',projectId:'saved'});assert.deepEqual(appCalls[1],{threadId:'task',assignment:{projectKind:'local',projectId:'saved'}});
@@ -39,4 +40,10 @@ test('ownerless desktop task batch: attach/resume without sending, delta/status/
     for(const e of [{method:'turn/started',params:{turn:{id:'turn',status:'inProgress'}}},{method:'item/agentMessage/delta',params:{turnId:'turn',itemId:'item',delta:'hello'}},{method:'item/agentMessage/delta',params:{turnId:'turn',itemId:'item',delta:' world'}},{method:'thread/settings/updated',params:{threadSettings:{model:'changed',effort:'low',cwd:'/project'}}}])listener(e);
     assert.equal(session.state.turns.at(-1).items[0].text,'hello world');assert.equal(session.state.latestThreadSettings.model,'changed');assert.equal(session.state.threadRuntimeStatus.type,'active');await session.request('thread-follower-start-turn',{conversationId:'task',turnStart:{request:{threadId:'task',input:[{type:'skill',name:'sample',path:'/skill'}]}}},2);assert.equal(calls.at(-1).method,'turn/start');assert.equal(calls.at(-1).params.input[0].type,'skill');listener({method:'disconnect'});assert.equal(session.connected,false);
   }finally{session.close();assert.equal(unwatched,true);}
+});
+
+
+test('desktop RPC method errors preserve safe numeric codes, without exporting raw upstream text',async()=>{
+ const bridge=new DesktopBridge(12345);(bridge as any).available=true;(bridge as any).evaluate=async(expression:string)=>{assert.ok(expression.includes('Number.isInteger(m.message.error.code)'));assert.ok(!expression.includes('message.error.message'));return {ok:false,rpcCode:-32601};};
+ await assert.rejects(bridge.rpc('thread/turns/list',{threadId:'existing'}),(e:unknown)=>e instanceof CodexRpcError&&e.code===-32601&&!e.message.includes('SECRET'));
 });

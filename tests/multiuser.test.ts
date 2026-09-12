@@ -1,3 +1,4 @@
+import {fakeHistoryReader} from './fixtures/history-peer';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -201,7 +202,7 @@ async function fixture(): Promise<Fixture> {
   const service = new CodexConsoleService(
     config,
     new CommandReceipts(receiptFile),
-    () => peer as any
+    () => peer as any, fakeHistoryReader((m,p)=>peer.request(m,p))
   );
   await service.connect();
   return { service, peer, identities, roots, receiptFile };

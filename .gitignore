@@ -8,3 +8,10 @@ data/
 coverage/
 
 .test-*
+
+dist/apk/
+
+# Native clients are delivered separately from the Web repository.
+/desktop/
+/mobile/
+/.tmp-rg.txt
