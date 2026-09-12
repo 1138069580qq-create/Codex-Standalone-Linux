@@ -142,3 +142,9 @@ test('a new weekly deadline identifies a reset even if the new used percentage e
  tick(1000);ledger.usage('deadline',counters(2000000),at());tick(1000);sample(ledger,at(),30,end+604800);
  assert.equal(ledger.overview(a).weeklyPercent,50);assert.equal(ledger.overview(a).subscriptionPercent,10);
 });
+test('a late reading from an older weekly deadline cannot consume the new window twice',async t=>{
+ const {ledger,at,tick}=await fixture(t),end=2000000000;sample(ledger,at(),0,end);ledger.bind('late-window',a,'pa',price.model,'Codex',true);
+ tick(1000);ledger.usage('late-window',counters(1000000),at());tick(1000);sample(ledger,at(),50,end);
+ tick(1000);sample(ledger,at(),0,end+604800);tick(1000);sample(ledger,at(),90,end);
+ tick(1000);ledger.usage('late-window',counters(2000000),at());tick(1000);sample(ledger,at(),10,end+604800);assert.equal(ledger.overview(a).weeklyPercent,60);
+});

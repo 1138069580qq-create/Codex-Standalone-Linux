@@ -38,7 +38,7 @@ export class LocalDevices {
    if(!d.tools.some(t=>t.name===rpc.params?.name))fail(400,'TOOL_UNAVAILABLE','Unknown local tool.');
    if(Date.now()-d.lastSeen>25000)fail(409,'DEVICE_OFFLINE','Local device offline; no server-file fallback.');
    if(d.jobs.size>=8)fail(429,'DEVICE_BUSY','Too many pending local operations.');
-   result=await new Promise<any>(resolve=>{const id=randomUUID(),timer=setTimeout(()=>{d.jobs.delete(id);resolve({content:[{type:'text',text:'OUTCOME_UNKNOWN: local request timed out. Inspect local receipts before retrying a write.'}],isError:true});},110000);d.jobs.set(id,{id,rpc,resolve,timer,delivered:false});d.wake?.();});
+   result=await new Promise<any>(resolve=>{const id=randomUUID(),timer=setTimeout(()=>{d.jobs.delete(id);resolve({content:[{type:'text',text:'OUTCOME_UNKNOWN: local request timed out. Inspect local receipts before retrying a write.'}],isError:true});},110000);d.jobs.set(id,{id,rpc:{...rpc,id},resolve,timer,delivered:false});d.wake?.();});
    this.active(d.binding.bindingId);
   }else return{jsonrpc:'2.0',id:rpc.id,error:{code:-32601,message:'Method not supported'}};
   return{jsonrpc:'2.0',id:rpc.id,result};

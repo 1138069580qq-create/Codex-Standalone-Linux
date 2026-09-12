@@ -1,3 +1,4 @@
+import {resumeThread} from './thread-resume';
 import {setLocalTools,isolateAccountThread} from './account-isolation';
 import {ensureStorage} from './account-storage';
 import path from 'node:path';
@@ -40,7 +41,7 @@ export class DesktopSessionService extends CodexConsoleService {
     if(!this.bridge?.available)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','MCP 接口未连接。');
     if(this.lastStatus==='running')throw new ConsoleError(409,'THREAD_BUSY','等待当前回复结束后再连接本地文件。');
     setLocalTools(this.config,identity,id,config);
-    try{if(this.config.value.accountIsolation)await isolateAccountThread(this.config,identity,project.root,id,undefined,(m,p)=>this.bridge!.rpc(m,p));else await this.bridge.rpc('thread/resume',{threadId:id,excludeTurns:true,config});}
+    try{if(this.config.value.accountIsolation)await isolateAccountThread(this.config,identity,project.root,id,undefined,(m,p)=>this.bridge!.rpc(m,p));else await resumeThread((m,p)=>this.bridge!.rpc(m,p),{threadId:id,excludeTurns:true,config});}
     catch(e){setLocalTools(this.config,identity,id,null);throw e;}return{ok:true};
   }
   override async mcp(identity:Identity,projectId:string,id?:string){this.requireCurrent(identity,projectId,id);if(!this.bridge?.available)throw new ConsoleError(503,'DESKTOP_BRIDGE_OFFLINE','MCP 接口未连接。');return readMcp((method,params)=>this.bridge!.rpc(method,params),id);}

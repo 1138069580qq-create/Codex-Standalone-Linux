@@ -122,7 +122,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
     const active=current(ctx)!,b=ctx.request.body as any,session=token(ctx);
     if(!b||typeof b.projectId!=='string'||typeof b.threadId!=='string'||typeof b.deviceId!=='string')throw new ConsoleError(400,'INVALID_DEVICE','Choose the current task.');
     await routes.service.snapshot(active.identity,b.projectId,b.threadId);
-    const pair=devices.create(active.user.id,session,b.threadId,b.deviceId,b.tools,()=>!!sessions.get(session,users));
+    const pair=devices.create(active.user.id,session,b.threadId,b.deviceId,b.tools,()=>{const active=sessions.get(session,users);if(!active)return false;try{routes.service.project(active.identity,b.projectId,'send');return true;}catch{return false;}});
     try{await routes.service.configureLocalTools(active.identity,b.projectId,b.threadId,{'mcp_servers.local_files':{url:`http://127.0.0.1:${options.port}/api/local-tools/mcp`,http_headers:{Authorization:'Bearer '+pair.token},tool_timeout_sec:115,enabled_tools:b.tools.map((t:any)=>t.name),tools:Object.fromEntries(b.tools.map((t:any)=>[t.name,{approval_mode:'approve'}]))}});}
     catch(e){devices.remove(pair.binding.bindingId,session);throw e;}
     ctx.body={binding:pair.binding};

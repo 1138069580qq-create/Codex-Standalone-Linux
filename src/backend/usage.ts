@@ -164,6 +164,7 @@ export class UsageLedger {
     const w=choices[0],at=limits.fetchedAt,bucket=w.bucketId||w.id;
     const last=this.db.prepare('SELECT * FROM quota ORDER BY id DESC LIMIT 1').get() as any;
     if(last&&at<=last.at)return;
+    if(last&&bucket===last.bucket&&last.reset_at&&w.resetsAt&&w.resetsAt<last.reset_at)return; // Discard a late response from an older weekly window.
     const confirmed=this.getMeta('pendingQuotaReset')===true,v=this.quotaDelta(last,bucket,w.usedPercent,w.resetsAt??null,at,confirmed);
     this.db.prepare('INSERT INTO quota(at,bucket,reset_at,used,delta,gap,highwater) VALUES (?,?,?,?,?,?,?)').run(at,bucket,w.resetsAt??null,w.usedPercent,v.delta,v.gap,v.highwater);
     if(confirmed&&(!last||w.resetsAt&&last.reset_at&&w.resetsAt>last.reset_at))this.setMeta('pendingQuotaReset',false);

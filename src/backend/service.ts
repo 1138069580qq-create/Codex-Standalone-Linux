@@ -1,3 +1,4 @@
+import {resumeThread} from './thread-resume';
 import {setLocalTools,accountProfile,verifyAccountProfile,isolateAccountThread} from './account-isolation';
 import {STORAGE_ID,storagePath,ensureStorage} from './account-storage';
 import { IsolatedHistoryReader } from './history-reader';
@@ -287,9 +288,9 @@ export class CodexConsoleService {
     if(identity.uuid)projects.push({id:"projectless",name:"无项目对话",root:"",permissions:{view:true,send:true,approve:true,files:false},kind:"projectless",activeCount:0});
     return projects;
   }
-  async rateLimits(identity: Identity): Promise<CodexRateLimits> {
+  async rateLimits(identity: Identity, fresh=false): Promise<CodexRateLimits> {
     if(!identity.uuid)throw new ConsoleError(401,"LOGIN_REQUIRED","请登录。");
-    if (this.limitsCache && Date.now() - this.limitsCache.fetchedAt < 300_000)
+    if (!fresh && this.limitsCache && Date.now() - this.limitsCache.fetchedAt < 300_000)
       return this.limitsCache;
     const raw = await this.rpc().request<any>("account/rateLimits/read", {});
     this.limitsCache = normalizeRateLimits(raw);
@@ -338,7 +339,7 @@ export class CodexConsoleService {
     const project=this.project(identity,projectId,'send');const thread=await this.verifyThread(project,id);
     if(runtimeStatus(thread)==='running')throw new ConsoleError(409,'THREAD_BUSY','等待当前回复结束后再连接本地文件。');
     const isolated=this.config.value.accountIsolation?await accountProfile(this.config,identity,project.root,undefined,(m,p)=>this.rpc().request(m,p)):null;
-    const result=await this.rpc().request<any>('thread/resume',{threadId:id,excludeTurns:true,...(isolated?{cwd:isolated.root,approvalPolicy:'never'}:{}),config:{...(isolated?.config||{}),...config}});
+    const result=await resumeThread((m,p)=>this.rpc().request(m,p),{threadId:id,excludeTurns:true,...(isolated?{cwd:isolated.root,approvalPolicy:'never'}:{}),config:{...(isolated?.config||{}),...config}});
     if(isolated)verifyAccountProfile(result,isolated);setLocalTools(this.config,identity,id,config);return{ok:true};
   }
   async mcp(identity: Identity, projectId: string, threadId?: string) {
@@ -471,7 +472,7 @@ export class CodexConsoleService {
       };
       this.sessions.set(id, session);
       try {
-        const resumed = await this.rpc().request<any>("thread/resume", {
+        const resumed = await resumeThread((m,p)=>this.rpc().request(m,p), {
           threadId: id,
           excludeTurns: true
         });

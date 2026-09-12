@@ -1,4 +1,5 @@
 import path from 'node:path';
+import {resumeThread} from './thread-resume';
 import {createHash} from 'node:crypto';
 import {ConsoleError,type ConfigStore,type Identity} from './config';
 import {ensureStorage} from './account-storage';
@@ -18,5 +19,5 @@ export function verifyAccountProfile(value:any,profile:{id:string;root:string}){
 }
 export async function isolateAccountThread(store:ConfigStore,who:Identity,root:string,threadId:string,mode:unknown,rpc:Rpc){
  const profile=await accountProfile(store,who,root,mode,rpc);
- const result=await rpc('thread/resume',{threadId,cwd:profile.root,excludeTurns:true,approvalPolicy:'never',config:{...profile.config,...(getLocalTools(store,who,threadId)||{})}});verifyAccountProfile(result,profile);return profile;
+ const result=await resumeThread(rpc,{threadId,cwd:profile.root,excludeTurns:true,approvalPolicy:'never',config:{...profile.config,...(getLocalTools(store,who,threadId)||{})}});verifyAccountProfile(result,profile);return profile;
 }

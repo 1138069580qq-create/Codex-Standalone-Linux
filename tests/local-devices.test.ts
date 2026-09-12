@@ -8,7 +8,7 @@ test('daily device MCP routes only to its authenticated account/session and revo
  await assert.rejects(d.mcp('unknown',rpc(1,'tools/list')),/expired/);
  const init=await d.mcp(a.token,rpc(1,'initialize',{protocolVersion:'2025-06-18'}));assert.match(init!.result.instructions,/ONLY.*Windows/);
  const pending=d.mcp(a.token,rpc(2,'tools/call',{name:'local_files_read',arguments:{grantId:'grant-a',path:'source.txt'}}));
- const polled=await d.poll(a.binding.bindingId,'session-a');assert.equal(polled.binding?.accountId,'alice');assert.equal(polled.job?.rpc.params.arguments.path,'source.txt');
+ const polled=await d.poll(a.binding.bindingId,'session-a');assert.equal(polled.binding?.accountId,'alice');assert.equal(polled.job?.rpc.id,polled.job?.id);assert.notEqual(polled.job?.rpc.id,2);assert.equal(polled.job?.rpc.params.arguments.path,'source.txt');
  assert.throws(()=>d.reply(a.binding.bindingId,'session-b',polled.job!.id,{content:[]}),/another login/);
  d.reply(a.binding.bindingId,'session-a',polled.job!.id,{content:[{type:'text',text:'local fixture'}],isError:false});assert.equal((await pending)!.result.content[0].text,'local fixture');
  assert.throws(()=>d.reply(a.binding.bindingId,'session-a',polled.job!.id,{content:[]}),/no longer pending/);
