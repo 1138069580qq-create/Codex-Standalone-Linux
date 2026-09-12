@@ -12,7 +12,7 @@ test('daily pairing HTTP requires login and CSRF, protects MCP by bearer, and in
  const login=await post('/api/login',{username:'member',password:'local-device-http-test'}),auth:any=await login.json(),headers={cookie:login.headers.get('set-cookie')!.split(';')[0],'x-csrf-token':auth.csrf};
  assert.equal((await post('/api/codex/local-devices',{},{cookie:headers.cookie})).status,403);
  const pairing=await post('/api/codex/local-devices',{projectId:'p',threadId:'task',deviceId:'win',tools},headers);assert.equal(pairing.status,200);const pair:any=await pairing.json();assert.equal(pair.binding.accountId,auth.user.id);assert.equal(pair.token,undefined);
- const token=config['mcp_servers.local_files'].http_headers.Authorization,rpc={jsonrpc:'2.0',id:1,method:'tools/list'};
+ assert.equal(config['mcp_servers.local_files.enabled'],false);const token=config['mcp_servers.local_device_files'].http_headers.Authorization,rpc={jsonrpc:'2.0',id:1,method:'tools/list'};
  assert.equal((await post('/api/local-tools/mcp',rpc,headers)).status,403);assert.equal((await post('/api/local-tools/mcp',rpc,{Authorization:token,Origin:'http://evil.invalid'})).status,403);
  const list=await post('/api/local-tools/mcp',rpc,{Authorization:token});assert.equal(list.status,200);assert.deepEqual((await list.json() as any).result.tools,tools);
  for(const endpoint of ['/api/admin/users','/api/admin/registrations','/api/codex/admin/config'])assert.equal((await fetch(base+endpoint,{headers})).status,403);
