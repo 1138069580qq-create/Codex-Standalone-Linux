@@ -593,6 +593,7 @@ export class CodexConsoleService {
     };
     return requestId ? this.receipts.run(`${identity.uuid}:create:${projectId}:${requestId}`, create) : create();
   }
+  async messageReceipt(identity:Identity,projectId:string,id:string,requestId:string){const project=this.project(identity,projectId,'send');await this.verifyThread(project,id);if(!/^[a-zA-Z0-9_-]{8,100}$/.test(requestId))throw new ConsoleError(400,'INVALID_MESSAGE','Invalid request id.');return this.receipts.lookup(`${identity.uuid}:${id}:${requestId}`);}
   async send(identity: Identity, projectId: string, id: string, input: any) {
     const project = this.project(identity, projectId, "send");
     if(this.config.value.accountIsolation&&input?.delivery==="steer")throw new ConsoleError(409,"ISOLATED_TURN_REQUIRED","请等待当前轮结束后发送，账号隔离不允许中途切换权限。");

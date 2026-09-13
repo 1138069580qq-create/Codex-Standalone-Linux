@@ -54,6 +54,7 @@ export class CommandReceipts {
     await this.flush();
     return result;
   }
+  lookup(key:string){const r=this.records.get(key);return !r?{state:'absent' as const}:r.state==='done'?{state:'accepted' as const,result:r.result}:{state:'pending' as const};}
   private flush(): Promise<void> {
     this.flushing = this.flushing
       .catch(() => {})

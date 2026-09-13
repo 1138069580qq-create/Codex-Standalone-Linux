@@ -1,4 +1,5 @@
 import path from 'node:path';
+import os from 'node:os';
 import {resumeThread} from './thread-resume';
 import {createHash} from 'node:crypto';
 import {ConsoleError,type ConfigStore,type Identity} from './config';
@@ -12,7 +13,7 @@ export async function accountProfile(store:ConfigStore,who:Identity,root:string,
  if(!['default','read-only','full',undefined].includes(mode as any))throw new ConsoleError(400,'INVALID_ACCESS','无效的访问权限。');
  const library=await ensureStorage(store.file,who),access=mode==='read-only'?'read':'write';
  const id='webui_'+createHash('sha256').update(JSON.stringify([who.uuid,root,library,access])).digest('hex').slice(0,32);
- return {id,root:path.resolve(root),config:{default_permissions:id,permissions:{[id]:{filesystem:{':minimal':'read',[path.resolve(root)]:access,[library]:access},network:{enabled:false}}}}};
+ return {id,root:path.resolve(root),config:{default_permissions:id,permissions:{[id]:{filesystem:{':minimal':'read',[path.join(os.homedir(),'.codex/skills/.system')]:'read',[path.resolve(root)]:access,[library]:access},network:{enabled:false}}}}};
 }
 export function verifyAccountProfile(value:any,profile:{id:string;root:string}){
  if(value?.activePermissionProfile?.id!==profile.id||value?.approvalPolicy!=='never'||path.resolve(value?.thread?.cwd||'')!==profile.root)throw new ConsoleError(503,'ISOLATION_UNAVAILABLE','服务器未确认账号文件隔离，未发送消息。');

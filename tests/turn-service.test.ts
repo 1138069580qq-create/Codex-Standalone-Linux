@@ -28,7 +28,7 @@ test('real HTTP pipeline restores final/timing/image metadata and enforces gener
  const snap=await runtime.service.snapshot({uuid:admin.id,elevated:true},'p','thread');assert.equal(snap.turns[0].durationMs,127000);assert.equal(snap.items.find(i=>i.id==='a')?.phase,'final_answer');assert.equal(snap.items.find(i=>i.id==='g')?.images?.[0].generated,'generated.png');assert.equal(JSON.stringify(snap).includes(saved),false);
  const thumb=await request(url);assert.equal(thumb.status,200);const metadata=await sharp(Buffer.from(await thumb.arrayBuffer())).metadata();assert.ok(metadata.width!<=384);assert.ok(metadata.height!<=384);
  assert.equal((await request(url,{'if-none-match':thumb.headers.get('etag')!})).status,304);
- const full=await request(url+'&full=1');assert.equal(full.status,200);const fullMeta=await sharp(Buffer.from(await full.arrayBuffer())).metadata();assert.equal(fullMeta.width,1600);assert.equal(fullMeta.height,1000);
+ const full=await request(url+'&full=1');assert.equal(full.status,200);assert.match(full.headers.get('content-type')||'',/image\/png/);const fullBytes=Buffer.from(await full.arrayBuffer());assert.deepEqual(fullBytes,await fs.readFile(saved));const fullMeta=await sharp(fullBytes).metadata();assert.equal(fullMeta.width,1600);assert.equal(fullMeta.height,1000);
  for(const suffix of [url.replace('itemId=g','itemId=a'),url.replace('index=0','index=9'),url.replace('threadId=thread','threadId=foreign')])assert.ok([400,403,404].includes((await request(suffix)).status));
  // A supplied path cannot change the selected artifact.
  const forged=await request(url+'&path=..%2Fsecret.png');assert.equal(forged.status,200);await forged.arrayBuffer();

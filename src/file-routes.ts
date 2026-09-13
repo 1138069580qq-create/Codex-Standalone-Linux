@@ -46,6 +46,7 @@ export function installFileRoutes(router:Router, access:Access) {
     const index=Number(query(c,'index')),item=snapshot.items.find((i:any)=>i.id===query(c,'itemId'));
     const name=Number.isInteger(index)&&index>=0&&index<8?item?.images?.[index]?.generated:undefined;
     if(!name)throw new ConsoleError(404,'IMAGE_NOT_FOUND','此对话中没有该图片。');
+    if(c.query.full==='1'){const original=await openProjectDownload(generatedImagesRoot(),name);c.type=contentType(name);c.set('Cache-Control','private, no-cache');c.set('Content-Length',String(original.total));c.body=original.stream;return;}
     const file=await images.read(generatedImagesRoot(),name,c.query.full==='1');
     c.set('Cache-Control','private, no-cache');c.set('ETag',file.etag);
     if(c.get('if-none-match').split(',').map(v=>v.trim()).includes(file.etag)){c.status=304;return;}

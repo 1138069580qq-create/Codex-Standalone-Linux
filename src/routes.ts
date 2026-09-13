@@ -85,7 +85,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
       } catch (error) {
         const info=publicBackendError(error),requestId=randomUUID();c.status=info.status;
         c.body={status:c.status,data:{...info,requestId},time:Date.now()};
-        if(!(error instanceof ConsoleError))console.warn('Codex operation failed %s',JSON.stringify({requestId,code:info.code,rpcCode:'rpcCode' in info?info.rpcCode:undefined}));
+        console.warn('Codex operation failed %s',JSON.stringify({requestId,code:info.code,rpcCode:'rpcCode' in info?info.rpcCode:undefined}));
       }
     };
   }
@@ -161,6 +161,7 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
       return service.send(who, b.projectId, c.params.id, b);
     })
   );
+  router.get('/threads/:id/messages/:requestId',wrap((c,who)=>service.messageReceipt(who,param(c,'projectId',64),c.params.id,c.params.requestId)));
   router.get('/threads/:id/queue',wrap((c,who)=>queue.list(who,param(c,'projectId',64),c.params.id)));
   router.post('/threads/:id/queue',wrap((c,who)=>{const b=body(c);return queue.enqueue(who,b.projectId,c.params.id,b);}));
   router.patch('/threads/:id/queue/:messageId',wrap((c,who)=>{const b=body(c);return queue.change(who,b.projectId,c.params.id,c.params.messageId,b);}));
