@@ -69,3 +69,8 @@ test('pagination loops, duplicate turns and malformed cursors fail instead of lo
 test('permission errors after one page cannot be disguised as a partial successful history',async()=>{
  let n=0;await assert.rejects(readThreadHistory(async()=>{if(n++)throw new CodexRpcError(-32001,'forbidden');return {data:[{id:'one'}],nextCursor:'next'};},'t'),(e:any)=>e.code===-32001);
 });
+
+test('inline generated image bytes do not exhaust history budget; text and original path remain',async()=>{
+ const out=await readThreadHistory(async()=>({data:[{id:'t',items:[{id:'image',type:'imageGeneration',result:'A'.repeat(3*1024*1024),savedPath:'/generated/image.png'},{id:'answer',type:'agentMessage',text:'图片已生成'}]}]}),'t');
+ assert.equal(out.data[0].items[0].result,undefined);assert.equal(out.data[0].items[0].savedPath,'/generated/image.png');assert.equal(out.data[0].items[1].text,'图片已生成');assert.equal(out.warning,undefined);
+});

@@ -3,6 +3,17 @@ import { ConsoleError } from './config';
 
 export const HISTORY_MAX_BYTES=2*1024*1024;
 export const HISTORY_MAX_TURNS=20;
+// Binary image results belong to the authorized file endpoint, not message history.
+function historyTurn(turn:any){
+ if(!Array.isArray(turn?.items))return turn;
+ return {...turn,items:turn.items.map((item:any)=>{
+  if(!item||!['imageGeneration','imageGenerationCall','imageView'].includes(item.type))return item;
+  const clean={...item};for(const key of ['result','b64_json','imageBase64','image_base64']){
+   const value=clean[key];if(typeof value==='string'&&(value.startsWith('data:image/')||value.length>8192&&/^[A-Za-z0-9+/=\r\n]+$/.test(value)))delete clean[key];
+  }return clean;
+ })};
+}
+
 export const historyTooLarge=()=>new ConsoleError(413,'HISTORY_TOO_LARGE','这段历史记录超过读取上限，请在桌面端查看。其他任务仍可使用。');
 export const isHistoryPayloadError=(error:unknown)=>Boolean(error&&typeof error==='object'&&'code' in error&&error.code==='WS_ERR_UNSUPPORTED_MESSAGE_LENGTH');
 const warning={code:'HISTORY_PARTIAL',message:'仅显示已读取的最近记录，较早内容超过读取上限。'};
@@ -27,7 +38,8 @@ export async function readThreadHistory(rpc:(method:string,params:any)=>Promise<
         const thread=legacy?.thread;
         if(thread?.id!==threadId||!Array.isArray(thread.turns))throw new Error('Invalid historical thread response');
         const selected:any[]=[];let size=0;
-        for(const turn of [...thread.turns].reverse().slice(0,limit)){
+        for(const raw of [...thread.turns].reverse().slice(0,limit)){
+          const turn=historyTurn(raw);
           size+=Buffer.byteLength(JSON.stringify(turn));
           if(size>HISTORY_MAX_BYTES){if(!selected.length)throw historyTooLarge();return {data:selected,nextCursor:'legacy-truncated',warning};}
           selected.push(turn);
@@ -37,7 +49,8 @@ export async function readThreadHistory(rpc:(method:string,params:any)=>Promise<
       throw error;
     }
     if(!Array.isArray(result?.data)||result.data.length>1||result.nextCursor!=null&&typeof result.nextCursor!=='string')throw new Error('Invalid paged historical thread response');
-    for(const turn of result.data){
+    for(const raw of result.data){
+      const turn=historyTurn(raw);
       if(!turn||typeof turn.id!=='string'||turns.has(turn.id))throw new Error('Invalid paged historical thread response');
       bytes+=Buffer.byteLength(JSON.stringify(turn));
       if(bytes>HISTORY_MAX_BYTES){if(data.length)return partial();throw historyTooLarge();}

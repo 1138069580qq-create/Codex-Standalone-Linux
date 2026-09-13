@@ -14,7 +14,7 @@ export class IsolatedHistoryReader {
     const generation=this.generation;let expired=false;
     const valid=()=>{if(generation!==this.generation||!current())throw new ConsoleError(409,'CONNECTION_CHANGED','连接已切换，已取消旧任务的读取。');if(expired)throw new ConsoleError(504,'HISTORY_TIMEOUT','读取历史记录超时，请重试。');};
     valid();
-    const peer=this.makePeer({...options,maxFrameBytes:4*1024*1024,connectTimeoutMs:4000,requestTimeoutMs:4000});this.active.add(peer);
+    const peer=this.makePeer({...options,maxFrameBytes:16*1024*1024,connectTimeoutMs:4000,requestTimeoutMs:4000});this.active.add(peer);
     const timer=setTimeout(()=>{expired=true;peer.close();},this.deadlineMs);
     try{
       await peer.connect();valid();
