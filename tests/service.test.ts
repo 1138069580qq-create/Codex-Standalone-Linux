@@ -469,3 +469,23 @@ test('failed creation revokes its provisional local pairing',async t=>{
  await assert.rejects(service.createThread(identity,'alpha','test','failed-local-create',()=>({config:{},commit:()=>{throw new Error('must not commit');},abort:()=>{aborted++;}})));
  assert.equal(aborted,1);
 });
+
+test('public progress streams before completion, replays only to its task and ignores hidden reasoning',async t=>{
+ const {service,peer,identity}=await fixture();t.after(()=>service.disconnect());await service.snapshot(identity,'alpha','thread-alpha');
+ const cursor=service.hub.cursor,events:any[]=[];t.after(service.hub.subscribe(e=>events.push(e)));
+ const send=(method:string,params:any)=>peer.emit('notification',{method,params:{threadId:'thread-alpha',turnId:'progress-turn',itemId:'progress',...params}});
+ send('item/reasoning/summaryPartAdded',{summaryIndex:0});
+ send('item/reasoning/summaryTextDelta',{summaryIndex:0,delta:'正在编写页面'});
+ send('item/reasoning/summaryTextDelta',{summaryIndex:0,delta:''});
+ send('item/reasoning/summaryTextDelta',{summaryIndex:0,delta:'。'});
+ send('item/reasoning/textDelta',{delta:'PRIVATE RAW CONTENT'});
+ send('item/reasoning/summaryPartAdded',{summaryIndex:1});
+ send('item/reasoning/summaryTextDelta',{summaryIndex:1,delta:'正在验证交互。'});
+ await new Promise(r=>setTimeout(r,150));
+ const deltas=events.filter(e=>e.type==='delta');assert.equal(deltas.map(e=>e.payload.text).join(''),'正在编写页面。\n正在验证交互。');
+ assert.ok(events.some(e=>e.type==='item'&&e.payload.type==='reasoning'));assert.ok(!JSON.stringify(events).includes('PRIVATE RAW CONTENT'));
+ assert.ok(service.hub.replay(cursor,'alpha','thread-alpha')!.length>0);assert.equal(service.hub.replay(cursor,'bravo','thread-bravo')!.length,0);
+ send('item/completed',{item:{id:'progress',type:'reasoning',summary:['正在编写页面。','正在验证交互。'],content:[{text:'PRIVATE RAW CONTENT'}]}});
+ const result=await service.snapshot(identity,'alpha','thread-alpha');assert.equal(result.items.find(i=>i.id==='progress')!.text,'正在编写页面。\n正在验证交互。');
+ assert.ok(!JSON.stringify(result.items).includes('PRIVATE RAW CONTENT'));
+});

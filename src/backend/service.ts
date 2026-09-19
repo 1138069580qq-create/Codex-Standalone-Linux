@@ -977,16 +977,24 @@ export class CodexConsoleService {
     if (
       method === "item/agentMessage/delta" ||
       method === "item/commandExecution/outputDelta" ||
+      method === "item/reasoning/summaryTextDelta" ||
+      method === "item/reasoning/summaryPartAdded" ||
       method === "item/plan/delta"
     ) {
+      // Only the protocol's public summary; never reasoning/textDelta or raw content.
+      const summaryPart = method === "item/reasoning/summaryPartAdded";
       let item = session.items.get(p.itemId);
+      const incoming = summaryPart ? (item?.text ? "\n" : "") : String(p.delta || "");
+      if (!incoming) return;
       if (!item) {
         item = {
           id: p.itemId,
           turnId: p.turnId||session.turnId,
           type: method.includes("agentMessage")
             ? "agentMessage"
-            : method.includes("plan")
+            : method.includes("reasoning")
+              ? "reasoning"
+              : method.includes("plan")
               ? "plan"
               : "commandExecution",
           text: "",
@@ -1001,16 +1009,11 @@ export class CodexConsoleService {
         });
       }
       if(item.truncated)return;
-      const incoming=String(p.delta || "");
       if(item.text.length+incoming.length>MAX_ITEM_CHARS){
         this.flushDeltas();item.text=textPrefix(item.text+incoming,MAX_ITEM_CHARS);item.truncated=true;
         this.hub.publish({type:"item",projectId:session.projectId,threadId:id,payload:{...item}});return;
       }
       const text = incoming;
-      if (!text) {
-        item.truncated = true;
-        return;
-      }
       const key = `${id}:${item.id}`;
       const batch = this.deltas.get(key) || {
         threadId: id,
