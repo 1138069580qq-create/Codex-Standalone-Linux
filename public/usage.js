@@ -44,8 +44,8 @@
   }
   async function open(tab){error('');if(typeof tab==='string')U.tab=tab;$('usage-settings-tab').hidden=!S.user?.admin;$('usage-members-tab').hidden=!S.user?.admin;$('usage-dialog').showModal();
     if(U.tab==='members'&&S.user?.admin){await selectTab('members');return;}
-    if(U.tab==='quota'){await load();await selectTab('quota');return;}
-    await Promise.all([load(),loadDetails()]);
+    if(U.tab==='quota'){await load(true);await selectTab('quota');return;}
+    await Promise.all([load(true),loadDetails()]);
   }
   async function loadDetails(more=false){
     const sequence=++U.detailSequence,account=S.user?.id;error('');
