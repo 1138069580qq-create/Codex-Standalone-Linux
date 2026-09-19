@@ -148,3 +148,13 @@ test('a late reading from an older weekly deadline cannot consume the new window
  tick(1000);sample(ledger,at(),0,end+604800);tick(1000);sample(ledger,at(),90,end);
  tick(1000);ledger.usage('late-window',counters(2000000),at());tick(1000);sample(ledger,at(),10,end+604800);assert.equal(ledger.overview(a).weeklyPercent,60);
 });
+
+test('only administrators change persistent subscription price without changing usage proportions',async t=>{
+ const {ledger,file}=await fixture(t);assert.equal(ledger.overview(a).subscriptionPriceCny,650);
+ assert.throws(()=>ledger.configure(a,{subscriptionPriceCny:700}));
+ const before=ledger.overview(a).subscriptionPercent;ledger.configure(admin,{subscriptionPriceCny:799.99});
+ assert.equal(ledger.settings(admin).subscriptionPriceCny,799.99);assert.equal(ledger.overview(a).subscriptionPriceCny,799.99);assert.equal(ledger.overview(a).subscriptionPercent,before);
+ for(const value of [-1,NaN,Infinity,1000001,1.001,'700',null])assert.throws(()=>ledger.configure(admin,{subscriptionPriceCny:value}));
+ assert.equal(ledger.overview(a).subscriptionPriceCny,799.99);const restored=new UsageLedger(file);try{assert.equal(restored.settings(admin).subscriptionPriceCny,799.99);}finally{restored.close();}
+ ledger.configure(admin,{subscriptionPriceCny:0});assert.equal(ledger.overview(a).subscriptionPriceCny,0);
+});

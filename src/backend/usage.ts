@@ -177,9 +177,12 @@ export class UsageLedger {
     const prior=this.getMeta('cycle'),cycle={start:info.start??this.startedAt,end:info.end,configured:info.status==='active',source:info.source,status:info.status,reason:info.reason,planType:info.planType,fetchedAt:info.fetchedAt};
     if(JSON.stringify(prior)!==JSON.stringify(cycle)){this.setMeta('cycle',cycle);this.cache.clear();this.sharedEstimate=undefined;}
   }
-  settings(who:Identity){requireAdmin(who);return {prices:[...this.prices.values()],cycle:this.getMeta('cycle'),startedAt:this.startedAt};}
+  settings(who:Identity){requireAdmin(who);return {subscriptionPriceCny:this.getMeta('subscriptionPriceCny')??650,prices:[...this.prices.values()],cycle:this.getMeta('cycle'),startedAt:this.startedAt};}
   configure(who:Identity,input:any){
-    requireAdmin(who);if(input.cycle!==undefined)throw new ConsoleError(400,"CYCLE_READ_ONLY","订阅日期自动从账户读取，不能手动修改。");const prices=validatePrices(input.prices);
+    requireAdmin(who);if(input.cycle!==undefined)throw new ConsoleError(400,"CYCLE_READ_ONLY","订阅日期自动从账户读取，不能手动修改。");const prices=input.prices===undefined?[...this.prices.values()]:validatePrices(input.prices);
+    const subscriptionPriceCny=input.subscriptionPriceCny===undefined?(this.getMeta('subscriptionPriceCny')??650):input.subscriptionPriceCny;
+    if(typeof subscriptionPriceCny!=='number'||!Number.isFinite(subscriptionPriceCny)||subscriptionPriceCny<0||subscriptionPriceCny>1000000||Math.abs(subscriptionPriceCny*100-Math.round(subscriptionPriceCny*100))>1e-7)throw new ConsoleError(400,'INVALID_PRICE','订阅价格须为 0 到 1000000 元，最多两位小数。');
+    this.setMeta('subscriptionPriceCny',subscriptionPriceCny);
     this.setMeta('prices',prices);this.prices=new Map(prices.map(p=>[p.model,p]));this.cache.clear();this.sharedEstimate=undefined;
     // Price changes apply to new events only; immutable historical rates remain auditable.
     return this.settings(who);
@@ -219,7 +222,7 @@ export class UsageLedger {
     const {all,quota,from,to,shares,allocated}=this.sharedEstimate;
     const usable=all.cost>0&&!all.unpriced&&quota.consumed>0&&!this.getMeta('quotaUnavailable');
     const weekUsd=usable?all.cost/(quota.consumed/100):null,weekPercent=usable?(shares.get(who.uuid)||0):null;
-    const value={generatedAt:now,startedAt:this.startedAt,cycle,cycleUsage:self,total:this.sum('user_id=?',[who.uuid]),weekUsd,cycleUsd:weekUsd===null?null:weekUsd*5,weeklyPercent:weekPercent,subscriptionPercent:weekPercent===null||!cycle.configured?null:weekPercent/5,weeksPerCycle:5,estimate:true,quotaGap:Boolean(quota.gaps)||quota.consumed>allocated+1e-9,quotaUnavailable:this.getMeta('quotaUnavailable'),limits:this.getMeta('limits'),pricingComplete:all.unpriced===0,calibration:{from,to},refreshSeconds:300};
+    const value={subscriptionPriceCny:this.getMeta('subscriptionPriceCny')??650,generatedAt:now,startedAt:this.startedAt,cycle,cycleUsage:self,total:this.sum('user_id=?',[who.uuid]),weekUsd,cycleUsd:weekUsd===null?null:weekUsd*5,weeklyPercent:weekPercent,subscriptionPercent:weekPercent===null||!cycle.configured?null:weekPercent/5,weeksPerCycle:5,estimate:true,quotaGap:Boolean(quota.gaps)||quota.consumed>allocated+1e-9,quotaUnavailable:this.getMeta('quotaUnavailable'),limits:this.getMeta('limits'),pricingComplete:all.unpriced===0,calibration:{from,to},refreshSeconds:300};
     this.cache.set(who.uuid,{at:now,value});return value;
   }
   memberOverview(who:Identity,members:readonly {id:string;username:string}[]){
@@ -248,7 +251,7 @@ export class UsageLedger {
     for(const row of rows){for(const key of Object.keys(total.cycleUsage) as (keyof typeof total.cycleUsage)[])total.cycleUsage[key]+=row.cycleUsage[key];if(total.weeklyPercent!==null)total.weeklyPercent+=row.weeklyPercent!;}
     if(total.weeklyPercent!==null)total.subscriptionPercent=total.weeklyPercent/weeksPerCycle;
     if(showObserved){total.observedWeeklyPercent=rows.reduce((sum,row)=>sum+row.observedWeeklyPercent!,0);total.observedSubscriptionPercent=total.observedWeeklyPercent/weeksPerCycle;}
-    return {generatedAt:snapshot.generatedAt,cycle,calibration,weeksPerCycle,cycleCapacityPercent:100,estimate:true,pricingComplete:all.unpriced===0,quotaGap:snapshot.quotaGap,members:rows,total};
+    return {subscriptionPriceCny:this.getMeta('subscriptionPriceCny')??650,generatedAt:snapshot.generatedAt,cycle,calibration,weeksPerCycle,cycleCapacityPercent:100,estimate:true,pricingComplete:all.unpriced===0,quotaGap:snapshot.quotaGap,members:rows,total};
   }
   details(who:Identity,input:{range?:string;model?:string;provider?:string;before?:number;offsetMinutes?:number;start?:number;end?:number}={}){
     const now=this.clock(),offset=Math.max(-840,Math.min(840,input.offsetMinutes||0))*60000;
