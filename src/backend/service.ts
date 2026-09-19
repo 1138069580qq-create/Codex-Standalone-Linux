@@ -1,3 +1,4 @@
+import {taskConfig} from './task-instructions';
 import {resumeThread,reconfigureThreadTools} from './thread-resume';
 import {setLocalTools,accountProfile,verifyAccountProfile,isolateAccountThread} from './account-isolation';
 import {STORAGE_ID,storagePath,ensureStorage} from './account-storage';
@@ -543,7 +544,7 @@ export class CodexConsoleService {
   }
   async createTask(_identity: Identity, _projectId: string, _input: any): Promise<any> { throw new ConsoleError(501, 'CREATION_UNAVAILABLE', 'This connection does not support combined task creation.'); }
   async taskCreation(_identity: Identity, _requestId: string): Promise<any> { throw new ConsoleError(404, 'CREATION_NOT_FOUND', 'Task creation is not available on this connection.'); }
-  async createThread(identity: Identity, projectId: string, title?: string, requestId?: string) {
+  async createThread(identity: Identity, projectId: string, title?: string, requestId?: string, prepareTools?:()=>{config:any;commit:(id:string)=>any;abort:()=>void}) {
     const project = this.project(identity, projectId, "send");
     if(projectId==="projectless")await fs.mkdir(project.root,{mode:0o700,recursive:false}).catch(e=>{if(e.code!=="EEXIST")throw e;});
     if (title !== undefined && (typeof title !== "string" || title.length > 120))
@@ -557,6 +558,7 @@ export class CodexConsoleService {
     if (requestId !== undefined && (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(requestId)))
       throw new ConsoleError(400, "INVALID_REQUEST_ID", "Invalid request ID.");
     const create = async () => {
+    const prepared=prepareTools?.();let committed=false;try{
     const isolated=this.config.value.accountIsolation?await accountProfile(this.config,identity,project.root,undefined,(m,p)=>this.rpc().request(m,p)):null;
     const result = await this.rpc().request<any>("thread/start", {
       cwd: project.root,
@@ -564,7 +566,8 @@ export class CodexConsoleService {
       ...(projectId==="projectless"?{projectId:null,threadSource:"user"}:{}),
       approvalPolicy: isolated?"never":"on-request",
       approvalsReviewer: "user",
-      ...(isolated?{config:isolated.config}:{sandbox:"workspace-write"})
+      config:taskConfig({...isolated?.config,...prepared?.config}),
+      ...(!isolated?{sandbox:"workspace-write"}:{})
     });
     if(isolated){verifyAccountProfile(result,isolated);}
     const thread = result.thread;
@@ -585,11 +588,16 @@ export class CodexConsoleService {
       touched: Date.now(),
       truncated: false
     });
+    const localDeviceBinding=prepared?.commit(thread.id);
+    if(prepared)setLocalTools(this.config,identity,thread.id,prepared.config);
+    committed=true;
     return {
       id: thread.id,
       title: title?.trim() || threadTitle(thread),
-      status: runtimeStatus(thread)
+      status: runtimeStatus(thread),
+      ...(localDeviceBinding?{localDeviceBinding}:{})
     };
+    }finally{if(!committed)prepared?.abort();}
     };
     return requestId ? this.receipts.run(`${identity.uuid}:create:${projectId}:${requestId}`, create) : create();
   }

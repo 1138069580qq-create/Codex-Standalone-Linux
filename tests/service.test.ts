@@ -442,3 +442,30 @@ test('one oversized task history leaves service and other project tasks connecte
  const other=await service.snapshot(identity,'bravo','thread-bravo');assert.equal(other.id,'thread-bravo');assert.equal(service.status(identity).connected,true);
  assert.equal(peer.requests.some(r=>r.method==='turn/start'),false);
 });
+
+test('history synchronization cannot generate model work and task policy travels with explicit dialogue only',{timeout:8000},async t=>{
+ const {service,peer,identity}=await fixture();t.after(()=>service.disconnect());
+ await service.snapshot(identity,'alpha','thread-alpha');await service.snapshot(identity,'alpha','thread-alpha');
+ assert.equal(peer.requests.some(r=>['turn/start','turn/steer','review/start','thread/compact/start'].includes(r.method)),false);
+ const pending=service.send(identity,'alpha','thread-alpha',{requestId:'user-dialogue-policy-001',text:'Keep my exact message 👩🏽‍💻',model:'fake-default'});
+ await peer.waitForTurnStarts(1);peer.turnStarts[0].resolve({turn:{id:'policy-turn',status:'completed'}});await pending;
+ const start=peer.requests.find(r=>r.method==='turn/start')!;
+ assert.equal(start.params.input[0].text,'Keep my exact message 👩🏽‍💻');assert.equal(start.params.collaborationMode.settings.developer_instructions,null);assert.match(peer.requests.find(r=>r.method==='thread/resume')!.params.config.developer_instructions,/不降低任务完整性/);
+});
+
+test('new task installs local tools before start and reuses its creation receipt',async t=>{
+ const {service,peer,identity,roots}=await fixture();t.after(()=>service.disconnect());
+ const original=peer.request.bind(peer);let started=0,prepared=0,aborted=0,committed='';
+ (peer as any).request=async(method:string,params:any)=>{if(method==='thread/start'){started++;assert.equal(params.config['mcp_servers.local_device_files'].url,'http://127.0.0.1/local');return {thread:{id:'created-local',cwd:roots.alpha,status:'idle'}};}if(method==='thread/name/set')return {};return original(method,params);};
+ const prepare=()=>{prepared++;return{config:{'mcp_servers.local_device_files':{url:'http://127.0.0.1/local'}},commit:(id:string)=>{committed=id;return{threadId:id,bindingId:'binding'};},abort:()=>{aborted++;}};};
+ const result=await service.createThread(identity,'alpha','test','local-create-request',prepare);
+ assert.equal(result.localDeviceBinding.threadId,result.id);assert.equal(committed,result.id);
+ assert.deepEqual(await service.createThread(identity,'alpha','test','local-create-request',prepare),result);
+ assert.equal(started,1);assert.equal(prepared,1);assert.equal(aborted,0);assert.ok(!peer.requests.some(c=>c.method==='thread/unsubscribe'));
+});
+test('failed creation revokes its provisional local pairing',async t=>{
+ const {service,peer,identity}=await fixture();t.after(()=>service.disconnect());let aborted=0;
+ peer.request=async()=>{throw new Error('start failed');};
+ await assert.rejects(service.createThread(identity,'alpha','test','failed-local-create',()=>({config:{},commit:()=>{throw new Error('must not commit');},abort:()=>{aborted++;}})));
+ assert.equal(aborted,1);
+});

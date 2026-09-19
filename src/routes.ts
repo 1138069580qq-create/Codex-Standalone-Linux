@@ -18,7 +18,7 @@ import { listProjectFiles, openProjectDownload, uploadProjectFile, projectDiff }
 export type ServiceFactory = (config: ConfigStore, receipts: CommandReceipts) => CodexConsoleService;
 
 export async function createCodexRoutes(config: ConfigStore, publicOrigin: string,
-  sessionIdentity: (ctx: Koa.Context) => Identity | null, factory?: ServiceFactory, listMembers: () => readonly {id:string;username:string}[] = () => [], resolveQueueUser?: (id:string)=>Identity|null) {
+  sessionIdentity: (ctx: Koa.Context) => Identity | null, factory?: ServiceFactory, listMembers: () => readonly {id:string;username:string}[] = () => [], resolveQueueUser?: (id:string)=>Identity|null, prepareThreadTools?: (c:Koa.Context,who:Identity,projectId:string,input:any)=>{config:any;commit:(id:string)=>any;abort:()=>void}) {
   const receipts = new CommandReceipts(path.join(path.dirname(config.file), "receipts.json"));
   await receipts.load();
   const service = factory ? factory(config, receipts) : new CodexConsoleService(config, receipts);
@@ -145,7 +145,8 @@ export async function createCodexRoutes(config: ConfigStore, publicOrigin: strin
     wrap((c, who) => {
       rateLimit(who, "create", 10);
       const b = body(c);
-      return service.createThread(who, b.projectId, b.title, b.requestId);
+      if(b.localDevice&&!prepareThreadTools)throw new ConsoleError(503,'LOCAL_CREATION_UNAVAILABLE','服务器暂不支持在创建时连接本机文件。');
+      return service.createThread(who, b.projectId, b.title, b.requestId,b.localDevice?()=>prepareThreadTools!(c,who,b.projectId,b.localDevice):undefined);
     })
   );
   router.get(

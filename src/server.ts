@@ -39,7 +39,14 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
   const token = (ctx: Koa.Context) => ctx.cookies.get(cookieName, { signed: false }) || "";
   const current = (ctx: Koa.Context) => sessions.get(token(ctx), users);
   const devices=new LocalDevices();
-  const routes = await createCodexRoutes(config, options.origin, ctx => current(ctx)?.identity || null, serviceFactory, () => users.users.map(publicUser), id=>{const user=users.users.find(u=>u.id===id);return user?{uuid:user.id,elevated:user.admin}:null;});
+  const routes: Awaited<ReturnType<typeof createCodexRoutes>> = await createCodexRoutes(config, options.origin, ctx => current(ctx)?.identity || null, serviceFactory, () => users.users.map(publicUser), id=>{const user=users.users.find(u=>u.id===id);return user?{uuid:user.id,elevated:user.admin}:null;},(ctx,who,projectId,input)=>{
+    const session=token(ctx),pair=devices.create(who.uuid,session,randomUUID(),input.deviceId,input.tools,()=>{
+      const active=sessions.get(session,users);if(!active)return false;
+      try{routes.service.project(active.identity,projectId,'send');return true;}catch{return false;}
+    });
+    return {config:localToolConfig(pair.token,input.tools),commit:(id:string)=>devices.attachThread(pair.binding.bindingId,session,id),abort:()=>{try{devices.remove(pair.binding.bindingId,session);}catch{}}};
+  });
+  function localToolConfig(secret:string,tools:any[]){return {'mcp_servers.local_files.enabled':false,'mcp_servers.local_device_files':{url:`http://127.0.0.1:${options.port}/api/local-tools/mcp`,http_headers:{Authorization:'Bearer '+secret},tool_timeout_sec:115,enabled_tools:tools.map(t=>t.name),tools:Object.fromEntries(tools.map(t=>[t.name,{approval_mode:'approve'}]))}};}
   function setCookie(ctx: Koa.Context, value: string, maxAge: number) {
     // TLS may terminate at the configured reverse proxy. Origin is startup-validated.
     ctx.cookies.secure = options.secureCookies;
