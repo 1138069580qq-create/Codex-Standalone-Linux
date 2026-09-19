@@ -10,3 +10,12 @@ export function publicBackendError(error:unknown){
   }
   return {status:502,code:'BACKEND_ERROR',message:'服务器未能完成此操作，请重试；持续失败请提供诊断编号。'};
 }
+
+/** Only fixed source names and line numbers; no error messages, request paths or bodies. */
+export function failureLocations(error:unknown):string[]{
+ const stack=error instanceof Error?error.stack:'';
+ return [...new Set((stack||'').split('\n').slice(1).flatMap(line=>{
+  const match=line.match(/(?:[/\\])(server|local-devices|thread-resume|service|transport|routes)\.ts:(\d+):(\d+)\)?$/);
+  return match?[`${match[1]}.ts:${match[2]}:${match[3]}`]:[];
+ }))].slice(0,6);
+}

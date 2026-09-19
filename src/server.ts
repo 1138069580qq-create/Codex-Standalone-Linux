@@ -4,7 +4,8 @@ import Router from "@koa/router";
 import bodyParser from "koa-bodyparser";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { publicBackendError, failureLocations } from "./backend/errors";
 import { gzip, gzipSync, brotliCompressSync } from "node:zlib";
 import { promisify } from "node:util";
 import { UserStore, Sessions, SESSION_LIFETIME_MS, RateLimiter, hashPassword, verifyPassword, publicUser } from "./auth";
@@ -58,8 +59,13 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
       const known = error instanceof ConsoleError;
       const status = known ? error.status : Number((error as any).status);
       ctx.status = status >= 400 && status <= 599 ? status : 500;
-      ctx.body = { status: ctx.status, data: { code: known ? error.code : "REQUEST_FAILED",
-        message: known ? error.message : "Request failed. Check input and server configuration." } };
+      const info = publicBackendError(error), requestId = randomUUID();
+      if (!known && 'rpcCode' in info) ctx.status = info.status;
+      ctx.body = { status: ctx.status, data: { code: known || 'rpcCode' in info ? info.code : "REQUEST_FAILED",
+        message: known || 'rpcCode' in info ? info.message : "Request failed. Check input and server configuration.", requestId } };
+      if (!known) console.warn('HTTP operation failed %s', JSON.stringify({requestId, status:ctx.status,
+        code:ctx.body.data.code, rpcCode:'rpcCode' in info ? info.rpcCode : undefined,
+        operation:ctx.path==='/api/codex/local-devices'?'local-device-pairing':'http', locations:failureLocations(error)}));
     }
     if (ctx.status === 429) ctx.set("Retry-After", "60");
     // SSE and downloads are streams: deliberately never buffer/compress them here.
