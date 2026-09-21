@@ -46,7 +46,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
     });
     return {config:localToolConfig(pair.token,input.tools),commit:(id:string)=>devices.attachThread(pair.binding.bindingId,session,id),abort:()=>{try{devices.remove(pair.binding.bindingId,session);}catch{}}};
   });
-  function localToolConfig(secret:string,tools:any[]){return {'mcp_servers.local_files.enabled':false,'mcp_servers.local_device_files':{url:`http://127.0.0.1:${options.port}/api/local-tools/mcp`,http_headers:{Authorization:'Bearer '+secret},tool_timeout_sec:115,enabled_tools:tools.map(t=>t.name),tools:Object.fromEntries(tools.map(t=>[t.name,{approval_mode:'approve'}]))}};}
+  function localToolConfig(secret:string,tools:any[]){return {developer_instructions:'当前为真实本机工作区。默认查找、修改和运行均使用 local_device_files MCP；先发现项目授权并复用。服务器目录只读，内置 shell 已关闭。本机不可用时暂停并说明原因，禁止改用服务器同名目录。长任务用 local_job_start 与稳定 executionId，按需读日志。','features.shell_tool':false,'features.unified_exec':false,'mcp_servers.local_files.enabled':false,'mcp_servers.local_device_files':{url:`http://127.0.0.1:${options.port}/api/local-tools/mcp`,http_headers:{Authorization:'Bearer '+secret},tool_timeout_sec:115,enabled_tools:tools.map(t=>t.name),tools:Object.fromEntries(tools.map(t=>[t.name,{approval_mode:'approve'}]))}};}
   function setCookie(ctx: Koa.Context, value: string, maxAge: number) {
     // TLS may terminate at the configured reverse proxy. Origin is startup-validated.
     ctx.cookies.secure = options.secureCookies;
@@ -136,7 +136,7 @@ export async function createApp(options = settings(), serviceFactory?: ServiceFa
     if(!b||typeof b.projectId!=='string'||typeof b.threadId!=='string'||typeof b.deviceId!=='string')throw new ConsoleError(400,'INVALID_DEVICE','Choose the current task.');
     await routes.service.snapshot(active.identity,b.projectId,b.threadId);
     const pair=devices.create(active.user.id,session,b.threadId,b.deviceId,b.tools,()=>{const active=sessions.get(session,users);if(!active)return false;try{routes.service.project(active.identity,b.projectId,'send');return true;}catch{return false;}});
-    try{await routes.service.configureLocalTools(active.identity,b.projectId,b.threadId,{'mcp_servers.local_files.enabled':false,'mcp_servers.local_device_files':{url:`http://127.0.0.1:${options.port}/api/local-tools/mcp`,http_headers:{Authorization:'Bearer '+pair.token},tool_timeout_sec:115,enabled_tools:b.tools.map((t:any)=>t.name),tools:Object.fromEntries(b.tools.map((t:any)=>[t.name,{approval_mode:'approve'}]))}});}
+    try{await routes.service.configureLocalTools(active.identity,b.projectId,b.threadId,localToolConfig(pair.token,b.tools));}
     catch(e){devices.remove(pair.binding.bindingId,session);throw e;}
     ctx.body={binding:pair.binding};
   });

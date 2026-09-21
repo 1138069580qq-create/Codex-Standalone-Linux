@@ -337,9 +337,10 @@ export class CodexConsoleService {
     return publicCatalog(await this.catalogFor(project.root,refresh));
   }
   async configureLocalTools(identity:Identity,projectId:string,id:string,config:any){
+    if(!this.config.value.accountIsolation)throw new ConsoleError(503,'ISOLATION_UNAVAILABLE','本机项目需要开启账号隔离。');
     const project=this.project(identity,projectId,'send');const thread=await this.verifyThread(project,id);
     if(runtimeStatus(thread)==='running')throw new ConsoleError(409,'THREAD_BUSY','等待当前回复结束后再连接本地文件。');
-    const isolated=this.config.value.accountIsolation?await accountProfile(this.config,identity,project.root,undefined,(m,p)=>this.rpc().request(m,p)):null;
+    const isolated=this.config.value.accountIsolation?await accountProfile(this.config,identity,project.root,'read-only',(m,p)=>this.rpc().request(m,p)):null;
     const slot=await this.turnGate.acquire(id);try{
     const result=await reconfigureThreadTools((m,p)=>this.rpc().request(m,p),{threadId:id,excludeTurns:true,...(isolated?{cwd:isolated.root,approvalPolicy:'never'}:{}),config:{...(isolated?.config||{}),...config}});
     if(isolated)verifyAccountProfile(result,isolated);setLocalTools(this.config,identity,id,config);return{ok:true};}finally{slot.finish('rejected');}
@@ -559,7 +560,8 @@ export class CodexConsoleService {
       throw new ConsoleError(400, "INVALID_REQUEST_ID", "Invalid request ID.");
     const create = async () => {
     const prepared=prepareTools?.();let committed=false;try{
-    const isolated=this.config.value.accountIsolation?await accountProfile(this.config,identity,project.root,undefined,(m,p)=>this.rpc().request(m,p)):null;
+    if(prepared&&!this.config.value.accountIsolation)throw new ConsoleError(503,'ISOLATION_UNAVAILABLE','本机项目需要开启账号隔离。');
+    const isolated=this.config.value.accountIsolation?await accountProfile(this.config,identity,project.root,prepared?'read-only':undefined,(m,p)=>this.rpc().request(m,p)):null;
     const result = await this.rpc().request<any>("thread/start", {
       cwd: project.root,
       runtimeWorkspaceRoots: [project.root],
